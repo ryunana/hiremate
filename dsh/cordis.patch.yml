@@ -1,0 +1,3 @@
+# 求职助手（hiremate）DSH 插件加载配置
+- id: hiremate-dsh
+  name: ./index.mjs

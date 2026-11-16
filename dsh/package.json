@@ -1,0 +1,29 @@
+{
+  "name": "hiremate-dsh",
+  "version": "0.1.0",
+  "description": "求职助手（hiremate）DeepSeek Harness 插件：BOSS 深筛排雷、四态投递账本、半自动/全自动消息答疑与本地静态看板。",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.mjs",
+    "cordis.patch.yml",
+    "skills"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "hiremate",
+    "job-search",
+    "求职助手"
+  ],
+  "license": "MIT"
+}
