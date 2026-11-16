@@ -129,7 +129,13 @@ export function apply(ctx) {
                 : (cfgResp?.hard_blocker === 'NO_RESUME_AVAILABLE'
                     ? '❌ 前置卡点：暂无任何本地或平台在线简历 — 请先在 BOSS 直聘填好在线简历或准备一份基础简历后再初始化'
                     : '📋 新手核对单：尚未完成建档 — 请对我说「帮我初始化求职助手」，核对浏览器权限并提供简历（拖入本地 PDF 或授权读取 BOSS 在线简历）')
-              const modeLabel = cfg.execution_mode === 'copilot' ? '副驾驶粘贴模式（无需浏览器权限）' : '浏览器直连模式'
+              const modeLabel = cfg.execution_mode === 'copilot'
+                ? '副驾驶粘贴模式（无需浏览器权限）'
+                : (cfg.browser_provider === 'ego_lite'
+                    ? '浏览器直连模式（ego lite 省Token）'
+                    : (cfg.browser_provider === 'builtin_browser_use'
+                        ? '浏览器直连模式（宿主自带 Browser Use）'
+                        : '浏览器直连模式'))
               const resumeLabel = cfg.resume_source === 'online_only'
                 ? '仅平台在线简历（无PDF附件）'
                 : (cfgResp?.resume_ready ? '真实履历与附件已就绪' : '待提供简历')

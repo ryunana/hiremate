@@ -769,6 +769,54 @@ console.log(JSON.stringify({{ skills, commands }}));
         self.assertIn("副驾驶粘贴协同", cop_html)
         self.assertIn("仅平台在线简历", cop_html)
 
+        # 6. 验证自带 Browser Use「有头+持久化」两分支判定与用户二选一持久化
+        _run_cli(flags + ["config", "set", "--execution-mode", "browser", "--browser-provider", "auto"])
+
+        # 分支 A-1：自带 Browser Use 不支持有头+持久化，且本机未装 ego lite -> 直接跳过并指引安装 ego lite + 告知用户
+        _, chk_skip_install = _run_cli(
+            flags + ["checklist", "--builtin-headed-persistent", "false", "--ego-installed", "false"]
+        )
+        self.assertEqual(chk_skip_install["items"][0]["status"], "install_ego_required")
+        self.assertIn("不支持有头+持久化", chk_skip_install["items"][0]["summary"])
+        self.assertIn("ego lite", chk_skip_install["items"][0]["action"])
+
+        # 分支 A-2：自带 Browser Use 不支持有头+持久化，本机已装 ego lite -> 直接跳过并切换本机 ego lite
+        _, chk_skip_ready = _run_cli(
+            flags + ["checklist", "--builtin-headed-persistent", "false", "--ego-installed", "true"]
+        )
+        self.assertEqual(chk_skip_ready["items"][0]["status"], "auto_ego_ready")
+        self.assertTrue(chk_skip_ready["ego_lite_installed"])
+
+        # 分支 B：自带 Browser Use 支持有头+持久化 -> 让用户按 Token 偏好二选一（ego lite vs 自带 Browser Use）
+        _, chk_choice = _run_cli(
+            flags + ["checklist", "--builtin-headed-persistent", "true", "--ego-installed", "false"]
+        )
+        self.assertEqual(chk_choice["items"][0]["status"], "choice_required")
+        self.assertIn("省 Token", chk_choice["items"][0]["action"])
+        self.assertIn("Token 多随便用", chk_choice["items"][0]["action"])
+
+        # 用户选定「Token 多随便用 -> 自带 Browser Use」后持久化生效并同步到看板
+        _run_cli(flags + ["config", "set", "--browser-provider", "builtin_browser_use"])
+        _, chk_chosen_builtin = _run_cli(flags + ["checklist", "--builtin-headed-persistent", "true"])
+        self.assertEqual(chk_chosen_builtin["browser_provider"], "builtin_browser_use")
+        self.assertEqual(chk_chosen_builtin["items"][0]["status"], "ready")
+        self.assertIn("宿主自带 Browser Use", chk_chosen_builtin["items"][0]["summary"])
+
+        dash_builtin = self.root / "builtin-browser-dash.html"
+        _run_cli(flags + ["build-dashboard", "--out", str(dash_builtin)])
+        self.assertIn("宿主自带 Browser Use", dash_builtin.read_text(encoding="utf-8"))
+
+        # 用户改选「省 Token -> ego lite」后同样持久化并同步到看板
+        _run_cli(flags + ["config", "set", "--browser-provider", "ego_lite"])
+        _, chk_chosen_ego = _run_cli(
+            flags + ["checklist", "--builtin-headed-persistent", "true", "--ego-installed", "true"]
+        )
+        self.assertEqual(chk_chosen_ego["browser_provider"], "ego_lite")
+        self.assertEqual(chk_chosen_ego["items"][0]["status"], "ready")
+        dash_ego = self.root / "ego-lite-dash.html"
+        _run_cli(flags + ["build-dashboard", "--out", str(dash_ego)])
+        self.assertIn("ego lite", dash_ego.read_text(encoding="utf-8"))
+
     def test_audit_hardening_employer_aliases_force_preserve_auto_confirm_and_fail_closed(self) -> None:
         from http.server import BaseHTTPRequestHandler, HTTPServer
         from hiremate_lib import client as hm_client

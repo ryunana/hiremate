@@ -22,11 +22,14 @@ python3 ~/.dsh/skills/hiremate/hiremate.py <子命令>
 
 ## 二、核心安全铁律与新用户 Checklist 引导闭环 SOP
 
-0. **首次接手必跑 `checklist` 与冷启动引导守卫**：
-   - 首次触发本技能时，先自检当前会话是否有可用浏览器操控工具，运行 `hiremate.py checklist --browser-capable <true|false>` 与 `hiremate.py auth status`；
-   - **无浏览器工具禁爬死红线**：若无正规浏览器操控工具，**严禁使用 `curl`/爬虫脚本请求 BOSS 直聘网页**！请向用户给出开启浏览器插件指引（如 `ego-browser` 或 Chrome MCP，Pro 自动巡检必需），或执行 `config set --execution-mode copilot` 切入「副驾驶粘贴模式」继续；
+0. **首次接手必检「自带 Browser Use 有头+持久化」并跑 `checklist`**：
+   - 首次触发本技能时，先判断当前宿主自带的 `Browser Use` 是否**同时支持「有头可见窗口（Headed）」与「登录态持久化（Persistent Profile）」**，运行 `hiremate.py checklist --builtin-headed-persistent <true|false>` 与 `hiremate.py auth status`；
+   - **浏览器通道两分支决策 & 禁爬死红线**：
+     - **自带 `Browser Use` 不支持有头+持久化（`false`）**：**直接跳过自带 `Browser Use`**，明确告知用户原因（无头或临时浏览器在 BOSS 直聘极易掉登录触发风控），立即协助安装并使用 **`ego lite`（`ego-browser`）**（macOS 可执行 `ego-browser` 技能内置 `install.sh`，Windows/通用引导下载 <https://lite.ego.app/> 并完成首次打开引导以注册 `ego-browser` 命令），随后运行 `config set --browser-provider ego_lite`（仅在用户明确无法装软件时切 `--execution-mode copilot` 副驾驶粘贴模式）；
+     - **自带 `Browser Use` 支持有头+持久化（`true`）**：若 `browser_provider` 为 `"auto"`，让用户二选一——**想节省 Token 则安装并使用 `ego lite`**（`--browser-provider ego_lite`），**Token 多随便用则直接使用自带 `Browser Use`**（`--browser-provider builtin_browser_use`）；
+     - **严禁使用 Headless 无头模式、空白临时窗口或 `curl`/爬虫脚本请求 BOSS 直聘网页**！
    - 若 `onboarding_completed: false`：**严禁空配置或无简历直接去 BOSS 盲搜、点沟通或代回消息**！向用户展示《四项启动准备核对单》进入第 2 步。
-1. **单浏览器空间复用 & 风控即停 & 云端 Fail-Closed**：绝不另起后台套娃进程，绝不每轮开新空白浏览器窗口；遇到未登录、右上角姓名不符、滑块或安全验证**立即原样停手通知用户本人处理**，绝不绕过；当任何 `pro` 子命令返回 `ok: false`、`downgraded: true` 或 `handoff_required: true` 时，**全自动（`auto`）档位必须立即停手，严禁跳过守卫自动发送**；首次切换 `auto` 全自动档位前，先向用户做简短风控风险提示，用户回复确认后再带 `--ack-auto-risk` 执行 `config set`。
+1. **有头单空间复用 & 风控即停 & 云端 Fail-Closed**：绝不另起后台套娃进程，无论使用 `ego lite` 还是自带 `Browser Use` 均须保持有头可见且复用同一持久化登录空间；遇到未登录、右上角姓名不符、滑块或安全验证**立即原样停手通知用户本人处理**，绝不绕过；当任何 `pro` 子命令返回 `ok: false`、`downgraded: true` 或 `handoff_required: true` 时，**全自动（`auto`）档位必须立即停手，严禁跳过守卫自动发送**；首次切换 `auto` 全自动档位前，先向用户做简短风控风险提示，用户回复确认后再带 `--ack-auto-risk` 执行 `config set`。
 2. **四项 Checklist 核对与 5 分钟建档（硬门槛：必须至少有一份简历）**：
    - **核对真实简历来源（二选一，两者皆无则立即停步）**：
      - 有本地 PDF/文档：直接拖进对话解析（`--resume-source attachment_pdf`）；

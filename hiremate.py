@@ -109,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="运行交互模式：browser=宿主具备浏览器权限自动直连，copilot=无浏览器权限由用户粘贴协同",
     )
     p_init.add_argument(
+        "--browser-provider",
+        choices=workspace.VALID_BROWSER_PROVIDERS,
+        help="浏览器操控通道：auto=按能力自动决策或待选，ego_lite=省Token紧凑DOM长驻浏览器，builtin_browser_use=宿主自带的有头持久化Browser Use",
+    )
+    p_init.add_argument(
         "--resume-source",
         choices=workspace.VALID_RESUME_SOURCES,
         help="简历来源形态：attachment_pdf=本地/线上PDF附件，online_only=仅平台在线简历无附件，both=在线+附件齐全，none=暂无任何简历",
@@ -121,11 +126,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     # 1b. checklist (冷启动四项准备核对单)
-    p_chk = sub.add_parser("checklist", help="输出面向新用户的《四项启动准备核对单》（浏览器权限/登录态/真实简历门槛/偏好与版本）")
+    p_chk = sub.add_parser("checklist", help="输出面向新用户的《四项启动准备核对单》（浏览器通道决策/登录态/真实简历门槛/偏好与版本）")
     p_chk.add_argument(
         "--browser-capable",
         choices=("true", "false"),
-        help="由当前桌面 Agent 传入自身是否具备可用浏览器操控工具（true / false）",
+        help="兼容标记：当前桌面 Agent 是否具备可用浏览器操控工具（true / false）",
+    )
+    p_chk.add_argument(
+        "--builtin-headed-persistent",
+        choices=("true", "false"),
+        help="当前宿主自带的 Browser Use 是否同时支持「有头可见窗口 + 登录态持久化」（false 则直接跳过并安装使用 ego lite；true 则让用户按 Token 偏好二选一）",
+    )
+    p_chk.add_argument(
+        "--ego-installed",
+        choices=("true", "false"),
+        help="可选覆盖本机 ego lite (`ego-browser`) 安装探测结果（省略时自动探测本机 PATH 与 ~/.local/bin）",
     )
 
     # 2. config
@@ -165,6 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--execution-mode",
         choices=workspace.VALID_EXECUTION_MODES,
         help="切换运行模式：browser（浏览器直连）或 copilot（无浏览器权限粘贴副驾驶）",
+    )
+    p_cfg_set.add_argument(
+        "--browser-provider",
+        choices=workspace.VALID_BROWSER_PROVIDERS,
+        help="切换浏览器操控通道：auto / ego_lite（省Token）/ builtin_browser_use（宿主自带的有头持久化Browser Use）",
     )
     p_cfg_set.add_argument(
         "--resume-source",
@@ -311,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "init":
+            creds = client.load_credentials(home)
+            tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
             res = workspace.init_workspace(
                 ws,
                 account_name=args.account_name,
@@ -323,7 +345,9 @@ def main(argv: list[str] | None = None) -> int:
                 filter_onsite=(args.filter_onsite == "true") if args.filter_onsite else None,
                 onsite_policy=args.onsite_policy,
                 execution_mode=args.execution_mode,
+                browser_provider=args.browser_provider,
                 resume_source=args.resume_source,
+                tier=tier,
                 force=args.force,
                 reset_profile=args.reset_profile,
             )
@@ -336,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
             tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
             email = str(creds.get("email") or "") if creds else None
             b_cap = None if args.browser_capable is None else (args.browser_capable == "true")
+            b_hp = None if args.builtin_headed_persistent is None else (args.builtin_headed_persistent == "true")
+            e_inst = None if args.ego_installed is None else (args.ego_installed == "true")
             _emit(
                 workspace.build_startup_checklist(
                     ws,
@@ -343,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
                     tier=tier,
                     authenticated_email=email,
                     browser_capable=b_cap,
+                    builtin_headed_persistent=b_hp,
+                    ego_installed=e_inst,
                 )
             )
             return 0
@@ -351,26 +379,35 @@ def main(argv: list[str] | None = None) -> int:
             if args.cfg_cmd == "show":
                 cfg = workspace.load_config(ws)
                 ob = workspace.inspect_onboarding_status(ws, cfg)
-                _emit(
-                    {
-                        "ok": True,
-                        "workspace": str(ws),
-                        "initialized": ob["initialized"],
-                        "onboarding_completed": ob["onboarding_completed"],
-                        "profile_customized": ob["profile_customized"],
-                        "resume_ready": ob["resume_ready"],
-                        "resume_source": ob["resume_source"],
-                        "has_attachment_resume": ob["has_attachment_resume"],
-                        "execution_mode": ob["execution_mode"],
-                        "hard_blocker": ob["hard_blocker"],
-                        "missing_steps": ob["missing_steps"],
-                        "recommendations": ob["recommendations"],
-                        "next_action_hint": ob["next_action_hint"],
-                        "config_file": str(workspace.config_path(ws)),
-                        "profile_facts_file": str(workspace.profile_facts_path(ws)),
-                        "config": cfg,
-                    }
-                )
+                creds = client.load_credentials(home)
+                tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
+                show_payload: dict[str, Any] = {
+                    "ok": True,
+                    "workspace": str(ws),
+                    "tier": tier,
+                    "initialized": ob["initialized"],
+                    "onboarding_completed": ob["onboarding_completed"],
+                    "profile_customized": ob["profile_customized"],
+                    "resume_ready": ob["resume_ready"],
+                    "resume_source": ob["resume_source"],
+                    "has_attachment_resume": ob["has_attachment_resume"],
+                    "execution_mode": ob["execution_mode"],
+                    "browser_provider": ob["browser_provider"],
+                    "hard_blocker": ob["hard_blocker"],
+                    "missing_steps": ob["missing_steps"],
+                    "recommendations": ob["recommendations"],
+                    "next_action_hint": ob["next_action_hint"],
+                    "config_file": str(workspace.config_path(ws)),
+                    "profile_facts_file": str(workspace.profile_facts_path(ws)),
+                    "config": cfg,
+                }
+                if ob["onboarding_completed"]:
+                    show_payload["post_onboarding_guide"] = workspace.build_post_onboarding_guide(
+                        cfg,
+                        tier=tier,
+                        dashboard_path=str((ws / "dashboard.html").resolve()),
+                    )
+                _emit(show_payload)
                 return 0
 
             if args.cfg_cmd == "set":
@@ -405,6 +442,8 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["onsite_policy"] = args.onsite_policy
                 if args.execution_mode:
                     cli_patch["execution_mode"] = args.execution_mode
+                if args.browser_provider:
+                    cli_patch["browser_provider"] = args.browser_provider
                 if args.resume_source:
                     cli_patch["resume_source"] = args.resume_source
                 if args.inbound_resume_policy:
@@ -470,9 +509,18 @@ def main(argv: list[str] | None = None) -> int:
                                 return 1
 
                 saved = workspace.save_config(ws, cfg)
+                creds_now = client.load_credentials(home)
+                tier_now = "pro" if (creds_now and creds_now.get("tier") == "pro") else "free"
+                ob_now = workspace.inspect_onboarding_status(ws, saved)
                 out_payload: dict[str, Any] = {"ok": True, "config": saved}
                 if auto_downgrade_note:
                     out_payload["notice"] = auto_downgrade_note
+                if ob_now["onboarding_completed"] or saved.get("target_roles"):
+                    out_payload["post_onboarding_guide"] = workspace.build_post_onboarding_guide(
+                        saved,
+                        tier=tier_now,
+                        dashboard_path=str((ws / "dashboard.html").resolve()),
+                    )
                 _emit(out_payload)
                 return 0
 
@@ -689,6 +737,14 @@ def main(argv: list[str] | None = None) -> int:
                 demo_tier=args.demo_tier,
                 pro_meta=pro_meta,
             )
+            if not args.demo and res.get("jobs_count", 0) == 0:
+                cfg_now = workspace.load_config(ws)
+                res["first_run_empty"] = True
+                res["post_onboarding_guide"] = workspace.build_post_onboarding_guide(
+                    cfg_now,
+                    tier=tier,
+                    dashboard_path=str(res.get("out_path") or ""),
+                )
             _emit(res)
             return 0
 

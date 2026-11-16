@@ -41,21 +41,22 @@
 ## 30 秒安装方式
 
 环境要求：本机已安装 Python 3.9+（macOS 自带 Python 即可运行，推荐 3.11/3.12），且正在使用 `WorkBuddy` 或 `DeepSeek Harness`（同时兼容自动发现 `~/.agents`、`~/.claude`、`~/.codex`）。
+浏览器操控：自动检测宿主自带 `Browser Use` 是否支持**有头可见 + 持久化登录态**——不支持时直接安装并启用防风控且省 Token 的 [`ego lite`](https://lite.ego.app/)；支持时由你自由二选一（想省 Token 用 `ego lite`，Token 充裕直接用自带 `Browser Use`）。
 
 ### 方式一：直接让桌面 Agent 替你安装（推荐，免敲命令）
 
 把下面这句话直接粘贴发给你的 `WorkBuddy` 或 `DeepSeek Harness`：
 
 ```text
-帮我安装并启动「求职助手」插件：https://github.com/ryunana/hiremate
+帮我安装并启动「求职助手」插件：https://gitee.com/ryunana/hiremate
 ```
 
-Agent 读取仓库内的 `AGENTS.md` 后会自动运行安装器，并引导你把简历拖进对话完成 5 分钟建档（产品官网与 Pro 账户中心：<https://hiremate.chengway.wang>）。
+Agent 读取仓库内的 `AGENTS.md` 后会自动运行安装器，并引导你把简历拖进对话完成 5 分钟建档（海外网络亦可使用 GitHub 镜像：`https://github.com/ryunana/hiremate`；产品官网与 Pro 账户中心：<https://hiremate.chengway.wang>）。
 
 ### 方式二：终端手动一键软链安装
 
 ```bash
-git clone https://github.com/ryunana/hiremate.git hiremate-open
+git clone https://gitee.com/ryunana/hiremate.git hiremate-open
 cd hiremate-open
 
 # 自动安装唯一主副本至 ~/.hiremate/skill/hiremate，并建立目录软链同步到本机全部已安装的 Agent 宿主

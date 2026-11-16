@@ -24,6 +24,7 @@ from .normalize import (
 DEFAULT_API_BASE = "https://hiremate.chengway.wang"
 VALID_MODES = ("semi", "auto")
 VALID_EXECUTION_MODES = ("browser", "copilot")
+VALID_BROWSER_PROVIDERS = ("auto", "ego_lite", "builtin_browser_use")
 VALID_RESUME_SOURCES = ("pending", "attachment_pdf", "online_only", "both", "none")
 VALID_CHANNEL_POLICIES = ("block_all", "inbound_only", "allow_all")
 VALID_HEADHUNTER_POLICIES = VALID_CHANNEL_POLICIES
@@ -36,6 +37,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "schema_version": 1,
     "account_display_name": "",
     "execution_mode": "browser",
+    "browser_provider": "auto",
     "resume_source": "pending",
     "has_attachment_resume": True,
     "mode_discover": "semi",
@@ -193,7 +195,21 @@ def apply_config_updates(cfg: dict[str, Any], patch: dict[str, Any]) -> dict[str
         elif rsrc in ("attachment_pdf", "both"):
             cfg["has_attachment_resume"] = True
 
+    if "browser_provider" in patch and patch["browser_provider"] is not None:
+        bprov = str(patch["browser_provider"]).strip()
+        cfg["browser_provider"] = bprov
+        if bprov in ("ego_lite", "builtin_browser_use") and "execution_mode" not in patch:
+            cfg["execution_mode"] = "browser"
+
     return cfg
+
+
+def detect_ego_lite_installed() -> bool:
+    """探测本机是否已安装并注册 ego lite 的 `ego-browser` 命令行入口。"""
+    if shutil.which("ego-browser"):
+        return True
+    local_bin = Path.home() / ".local" / "bin" / "ego-browser"
+    return local_bin.is_file()
 
 
 def validate_and_normalize_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -211,6 +227,8 @@ def validate_and_normalize_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"mode_reply 仅支持 {VALID_MODES}，收到: {cfg['mode_reply']!r}")
     if cfg["execution_mode"] not in VALID_EXECUTION_MODES:
         raise ValueError(f"execution_mode 仅支持 {VALID_EXECUTION_MODES}，收到: {cfg['execution_mode']!r}")
+    if cfg["browser_provider"] not in VALID_BROWSER_PROVIDERS:
+        raise ValueError(f"browser_provider 仅支持 {VALID_BROWSER_PROVIDERS}，收到: {cfg['browser_provider']!r}")
     if cfg["resume_source"] not in VALID_RESUME_SOURCES:
         raise ValueError(f"resume_source 仅支持 {VALID_RESUME_SOURCES}，收到: {cfg['resume_source']!r}")
     if cfg["resume_source"] in ("online_only", "none"):
@@ -405,6 +423,7 @@ def inspect_onboarding_status(
 
     resume_source = str(effective_cfg.get("resume_source") or "pending")
     execution_mode = str(effective_cfg.get("execution_mode") or "browser")
+    browser_provider = str(effective_cfg.get("browser_provider") or "auto")
     has_attachment_resume = bool(effective_cfg.get("has_attachment_resume", True))
     has_roles = bool(effective_cfg.get("target_roles"))
     has_account_name = bool(str(effective_cfg.get("account_display_name") or "").strip())
@@ -447,13 +466,23 @@ def inspect_onboarding_status(
         )
     elif not onboarding_completed:
         next_action_hint = (
-            "检测到新用户尚未完成建档：请先运行 `hiremate.py checklist` 向用户展示《四项启动准备核对单》——"
-            "① 确认浏览器操控权限（无权限则指引开启或切 `--execution-mode copilot` 副驾驶粘贴模式，严禁脚本硬抓网页）；"
-            "② 核对至少一份真实简历（拖入本地 PDF，或有浏览器权限时直接读取 BOSS 在线简历 `https://www.zhipin.com/web/geek/resume`，无简历则立即停步）；"
+            "检测到新用户尚未完成建档：请先运行 `hiremate.py checklist --builtin-headed-persistent <true|false>` 向用户展示《四项启动准备核对单》——"
+            "① 先判断宿主自带 Browser Use 能否支持「有头可见 + 持久化登录态」：若不支持则直接跳过并安装使用 ego lite（告知用户原因）；"
+            "若支持则让用户二选一（想省 Token 则安装使用 ego lite，Token 充裕随便用则直接用自带 Browser Use；严禁无头/临时浏览器或脚本硬抓网页）；"
+            "② 核对至少一份真实简历（拖入本地 PDF，或直接读取 BOSS 在线简历 `https://www.zhipin.com/web/geek/resume`，无简历则立即停步）；"
             "③ 确认岗位/城市/底薪及外包与驻场接受度，运行 init 并写入确认后的 profile_facts.md。"
         )
     else:
-        next_action_hint = "求职档案已就绪，可按当前版本与运行模式（网页直连 / 副驾驶粘贴）执行深筛、答疑或刷新看板。"
+        if execution_mode == "copilot":
+            next_action_hint = (
+                "求职档案已就绪（当前为副驾驶粘贴模式）：请先顺手运行 `hiremate.py build-dashboard` 生成初始看板，"
+                "并在回复末尾主动给出 `1 / 2 / 3` 下一步菜单（① 粘贴一条 BOSS 岗位 JD 试跑排雷与破冰草稿；② 粘贴 HR 消息拟回复；③ 开启浏览器直连自动搜岗），切勿建完档直接停步冷场。"
+            )
+        else:
+            next_action_hint = (
+                "求职档案已就绪（当前为浏览器直连模式）：请先顺手运行 `hiremate.py build-dashboard` 生成初始看板，"
+                "并在回复末尾主动给出 `1 / 2 / 3` 下一步菜单（①【推荐】立即去 BOSS 直聘跑首轮搜岗深筛与半自动破冰预览；② 粘贴单条岗位 JD/HR 消息参谋；③ 打开看板或微调偏好），切勿建完档直接停步冷场。"
+            )
 
     return {
         "initialized": initialized,
@@ -463,6 +492,7 @@ def inspect_onboarding_status(
         "resume_source": resume_source,
         "has_attachment_resume": has_attachment_resume,
         "execution_mode": execution_mode,
+        "browser_provider": browser_provider,
         "hard_blocker": hard_blocker,
         "missing_steps": missing_steps,
         "recommendations": recommendations,
@@ -477,32 +507,99 @@ def build_startup_checklist(
     tier: str = "free",
     authenticated_email: str | None = None,
     browser_capable: bool | None = None,
+    builtin_headed_persistent: bool | None = None,
+    ego_installed: bool | None = None,
 ) -> dict[str, Any]:
     """构建面向新用户与桌面 Agent 的《四项启动准备核对单（Checklist）》。"""
     effective_cfg = cfg if cfg is not None else load_config(workspace)
     ob = inspect_onboarding_status(workspace, effective_cfg)
     exec_mode = ob["execution_mode"]
+    browser_provider = ob["browser_provider"]
     resume_src = ob["resume_source"]
+    has_ego = detect_ego_lite_installed() if ego_installed is None else bool(ego_installed)
 
-    # 第 1 项：浏览器操控权限
-    if browser_capable is True:
+    # 第 1 项：浏览器操控通道决策（先判宿主自带 Browser Use 有头+持久化能力，再自动切 ego lite 或交给用户二选一）
+    if exec_mode == "copilot" or (browser_capable is False and builtin_headed_persistent is None):
+        b_status = "copilot_fallback"
+        b_icon = "⚠️"
+        b_summary = "当前无浏览器操控权限（可安装启用 ego lite，或使用「副驾驶粘贴模式」继续）"
+        b_action = (
+            "自动直连推荐：若宿主自带 Browser Use 支持有头+持久化可直接选用，否则直接安装并使用 ego lite（https://lite.ego.app/，省 Token 且防风控，Pro 自动巡检必需）。"
+            "若当前环境不便安装浏览器，可保持 `--execution-mode copilot` 由用户粘贴 JD/消息完成排雷、拟话术与记账（严禁使用无头临时浏览器或 curl/爬虫脚本抓网页）。"
+        )
+    elif builtin_headed_persistent is False:
+        if has_ego:
+            b_status = "auto_ego_ready"
+            b_icon = "✅"
+            b_summary = "自带 Browser Use 不支持有头+持久化，已跳过并切换为 ego lite（本机已安装就绪）"
+            b_action = (
+                "请明确告知用户：当前宿主自带浏览器不支持「有头可见窗口 + 登录态持久化」（在 BOSS 直聘易掉登录或触发无头反爬风控），"
+                "已直接跳过自带 Browser Use 并使用本机 ego lite（`ego-browser`）；请运行 `config set --browser-provider ego_lite` 锁定通道。"
+            )
+        else:
+            b_status = "install_ego_required"
+            b_icon = "🔧"
+            b_summary = "自带 Browser Use 不支持有头+持久化，已直接跳过，准备安装并使用 ego lite"
+            b_action = (
+                "请明确告知用户跳过自带 Browser Use 的原因（缺有头可见或持久化登录态易触发 BOSS 风控），并立即协助安装 ego lite"
+                "（macOS 可执行 ego-browser 技能内置 `install.sh`，Windows/通用引导下载 https://lite.ego.app/ 并完成首次打开引导以注册 `ego-browser` 命令），"
+                "就绪后运行 `config set --browser-provider ego_lite`（若用户明确不便安装，再切换 `--execution-mode copilot` 兜底；严禁使用无头浏览器或爬虫脚本）。"
+            )
+    elif builtin_headed_persistent is True:
+        if browser_provider == "ego_lite":
+            b_status = "ready" if has_ego else "install_ego_required"
+            b_icon = "✅" if has_ego else "🔧"
+            b_summary = "已选定省 Token 通道：ego lite（紧凑 DOM 快照）" + ("" if has_ego else " · 待完成安装")
+            b_action = (
+                "全程复用 `ego-browser` 持久化窗口操作 BOSS 直聘，大幅节省单轮搜岗与 Pro 定时巡检 Token。"
+                if has_ego
+                else "用户已选定省 Token 的 ego lite 方案，请协助安装 https://lite.ego.app/ 并完成首次打开引导注册 `ego-browser` 命令。"
+            )
+        elif browser_provider == "builtin_browser_use":
+            b_status = "ready"
+            b_icon = "✅"
+            b_summary = "已选定免装直用通道：宿主自带 Browser Use（有头 + 持久化登录态）"
+            b_action = "直接复用宿主自带的有头持久化 Browser Use 窗口操作 BOSS 直聘（免额外装软件；严禁切回 Headless 无头模式或新建空白无痕窗口）。"
+        else:
+            b_status = "choice_required"
+            b_icon = "⚖️"
+            b_summary = "宿主自带 Browser Use 支持「有头 + 持久化」，请让用户按 Token 预算二选一"
+            ego_tag = "本机已安装，可直接用" if has_ego else "本机未装，选此项则顺手安装启用"
+            b_action = (
+                f"请把选择权交给用户，选定后运行 `config set --browser-provider <ego_lite|builtin_browser_use>`："
+                f"① 【想省 Token】安装并使用 ego lite（紧凑 DOM 引用快照，大幅节省搜岗与 Pro 高频巡检 Token；{ego_tag}）；"
+                f"② 【Token 多随便用】直接使用宿主自带 Browser Use（免额外装软件开箱即用，视觉截图推理消耗较高）。"
+            )
+    elif browser_provider == "ego_lite":
+        b_status = "ready" if has_ego else "install_ego_required"
+        b_icon = "✅" if has_ego else "🔧"
+        b_summary = "已配置浏览器通道：ego lite（省 Token 持久化窗口）" + ("" if has_ego else " · 待安装 ego lite")
+        b_action = (
+            "直接复用已登录的 `ego-browser` 窗口读取在线简历、深筛岗位与收发消息。"
+            if has_ego
+            else "请先协助安装 ego lite（https://lite.ego.app/）并完成首次打开引导以启用 `ego-browser` 命令。"
+        )
+    elif browser_provider == "builtin_browser_use":
+        b_status = "ready"
+        b_icon = "✅"
+        b_summary = "已配置浏览器通道：宿主自带 Browser Use（有头 + 持久化窗口）"
+        b_action = "直接复用宿主自带的有头持久化 Browser Use 窗口操作 BOSS 直聘（严禁使用 Headless 无头或临时无痕实例）。"
+    elif browser_capable is True:
         b_status = "ready"
         b_icon = "✅"
         b_summary = "已具备浏览器操控权限（网页自动直连模式）"
-        b_action = "可直接复用已登录浏览器读取在线简历、核对线上附件、深筛岗位与发送消息。"
-    elif browser_capable is False or exec_mode == "copilot":
-        b_status = "copilot_fallback"
-        b_icon = "⚠️"
-        b_summary = "当前无浏览器操控权限（可一键开启，或使用「副驾驶粘贴模式」继续）"
         b_action = (
-            "开启方式：WorkBuddy 请打开内置网页/ego-browser 授权；DSH / Claude Code / Codex 请挂载 ego-browser 或 Chrome MCP（Pro 自动巡检必需）。"
-            "若暂不开启，可设为 `--execution-mode copilot` 由用户粘贴 JD/消息完成排雷、拟话术与记账（严禁使用 curl/爬虫脚本抓网页）。"
+            "若宿主自带 Browser Use 支持有头+持久化，请让用户选择「省 Token 装用 ego lite」或「Token 充裕直接用自带 Browser Use」；"
+            "若自带 Browser Use 不支持有头+持久化，请直接跳过并安装使用 ego lite 且告知用户。"
         )
     else:
         b_status = "ready" if ob["initialized"] else "needs_check"
         b_icon = "✅" if ob["initialized"] else "⬜"
-        b_summary = "默认网页直连模式（请 Agent 先自检手头浏览器工具是否可用）"
-        b_action = "若有浏览器工具直接复用；若无浏览器工具请提示用户开启或切换 `--execution-mode copilot`。"
+        b_summary = "默认网页直连模式（请 Agent 先自检自带 Browser Use 是否支持有头+持久化）"
+        b_action = (
+            "请运行 `checklist --builtin-headed-persistent <true|false>`：不支持有头+持久化则跳过并安装使用 ego lite（告知用户）；"
+            "支持则让用户选择「省 Token 用 ego lite」或「Token 多直接用自带 Browser Use」。"
+        )
 
     # 第 2 项：招聘平台本人登录态
     acct_name = str(effective_cfg.get("account_display_name") or "").strip()
@@ -625,17 +722,143 @@ def build_startup_checklist(
         f"   - {pref_action}",
     ]
 
-    return {
+    res_chk: dict[str, Any] = {
         "ok": True,
         "tier": tier,
         "onboarding_completed": ob["onboarding_completed"],
         "can_proceed_to_search": ob["onboarding_completed"],
         "hard_blocker": ob["hard_blocker"],
         "execution_mode": exec_mode,
+        "browser_provider": browser_provider,
+        "ego_lite_installed": has_ego,
+        "builtin_headed_persistent": builtin_headed_persistent,
         "resume_source": resume_src,
         "has_attachment_resume": ob["has_attachment_resume"],
         "items": items,
         "markdown": "\n".join(md_lines),
+    }
+    if ob["onboarding_completed"]:
+        res_chk["post_onboarding_guide"] = build_post_onboarding_guide(
+            effective_cfg,
+            tier=tier,
+            dashboard_path=str((workspace / "dashboard.html").resolve()),
+        )
+    return res_chk
+
+
+def build_post_onboarding_guide(
+    cfg: dict[str, Any],
+    *,
+    tier: str = "free",
+    dashboard_path: str | None = None,
+) -> dict[str, Any]:
+    """构建建档完成后的强制下一步引导（供 Agent 直接展示给用户，杜绝建完档停步冷场）。"""
+    exec_mode = str(cfg.get("execution_mode") or "browser")
+    b_prov = str(cfg.get("browser_provider") or "auto")
+    roles = " / ".join(cfg.get("target_roles") or []) or "目标岗位"
+    cities = " / ".join(cfg.get("preferred_cities") or []) or "不限城市"
+    min_k = int(cfg.get("min_salary_k", 20) or 20)
+    shield_cnt = len(cfg.get("past_employers") or [])
+    dash_note = f"（本地看板路径：`{dashboard_path}`）" if dashboard_path else ""
+
+    if exec_mode == "copilot":
+        recommended_action = "paste_first_jd_or_enable_browser"
+        options = [
+            {
+                "key": "1",
+                "label": "【最常用】直接粘贴一条 BOSS 岗位 JD 或截图给我试水准",
+                "detail": f"立刻帮你核对前东家（已保护 {shield_cnt} 家）与外包/驻场风险、提炼匹配亮点与缺口，并拟好 1～2 句真人感破冰话术供你复制发送",
+            },
+            {
+                "key": "2",
+                "label": "粘贴一条 HR 刚发来的追问消息让我拟回复",
+                "detail": "严格对照你的真实履历档案拟定自然日常短句（绝不瞎编），并自动记入本地四态求职账本",
+            },
+            {
+                "key": "3",
+                "label": "开启浏览器自动直连（免手动复制粘贴）",
+                "detail": "启用省 Token 的 ego lite 或宿主自带的有头持久化 Browser Use，让我直接去 BOSS 网页替你刷列表深筛"
+                + ("与自动巡检" if tier == "pro" else ""),
+            },
+        ]
+        menu_lines = [
+            "### 🚀 本地建档已完成！接下来直接这样开始（回复数字或直接发内容即可）：",
+            f"- **回复 `1` 或直接把岗位 JD 贴进来（推荐）**：我立即替你做外包/前东家排雷、分析匹配点与缺口，并拟好破冰短句供你复制发送",
+            "- **回复 `2` 或粘贴 HR 消息**：对照你的真实履历拟定 1～2 句自然回复草稿，并同步记入本地台账",
+            f"- **回复 `3`**：开启浏览器自动直连模式（免手动粘贴，直接去 BOSS 替你刷 `{roles}` 列表深筛）{dash_note}",
+        ]
+    elif tier == "pro":
+        recommended_action = "run_pro_first_round_and_schedule_patrol"
+        prov_label = (
+            "ego lite 省 Token 通道"
+            if b_prov == "ego_lite"
+            else ("宿主自带 Browser Use" if b_prov == "builtin_browser_use" else "已登录浏览器")
+        )
+        options = [
+            {
+                "key": "1",
+                "label": "【推荐】立即去 BOSS 跑首轮 Pro 深度排雷筛岗 + 检查未读消息",
+                "detail": f"通过{prov_label}按「{roles} · {cities} · {min_k}K+」筛出高匹配自研岗（100+ 深度外包名录自动避坑、跳过 {shield_cnt} 家前东家）",
+            },
+            {
+                "key": "2",
+                "label": "一键挂载工作日错峰自动巡检定时任务",
+                "detail": "每周一至周五 09:00–12:00、14:00–18:00 每 10～15 分钟自动盯未读消息、递对应简历，遇到约面/谈薪立即弹窗叫你",
+            },
+            {
+                "key": "3",
+                "label": "切换半自动 / 全自动档位或查看本地求职看板",
+                "detail": f"当前可分别设定「主动找岗」与「消息答疑」为半自动确认（semi）或全自动托管（auto）{dash_note}",
+            },
+        ]
+        menu_lines = [
+            "### 🚀 Pro 求职档案已就绪！回复数字直接开工：",
+            f"1. **【推荐】立即跑首轮 BOSS 深度搜岗 + 未读消息检查** — 按 `{roles}`（`{cities}` · `{min_k}K+`）穿透筛除 100+ 伪装外包并避开 {shield_cnt} 家前东家",
+            "2. **一键开启工作日自动盯盘巡检** — 挂载周一至周五白天错峰定时巡检，自动接话递简历、到约面弹窗喊你",
+            f"3. **调整半自动/全自动档位 或 打开本地看板**{dash_note}",
+        ]
+    else:
+        recommended_action = "run_free_first_round_boss_preview"
+        prov_label = (
+            "ego lite"
+            if b_prov == "ego_lite"
+            else ("自带 Browser Use" if b_prov == "builtin_browser_use" else "浏览器")
+        )
+        options = [
+            {
+                "key": "1",
+                "label": "【推荐】立即去 BOSS 直聘跑第一轮搜岗深筛预览（先验水准，不乱点发送）",
+                "detail": f"使用{prov_label}按「{roles} · {cities} · {min_k}K+」筛出 3～5 个靠谱自研候选、自动绕开 {shield_cnt} 家前东家与外包，生成破冰话术审阅单给你过目，等你回序号才发送",
+            },
+            {
+                "key": "2",
+                "label": "发一个你看中的岗位 JD 或 HR 消息让我参谋",
+                "detail": "直接把岗位文本或截图发进对话，替你查外包排雷、分析匹配依据与缺口，并记入本地四态账本",
+            },
+            {
+                "key": "3",
+                "label": "打开本地求职看板 / 微调筛选偏好",
+                "detail": f"查看刚生成的静态看板{dash_note}，或随时一句话修改薪资、城市、外包/驻场开关",
+            },
+        ]
+        menu_lines = [
+            "### 🚀 本地建档已完成！接下来想怎么试跑？（直接回数字 `1` 即可开始）",
+            f"1. **【推荐】立即去 BOSS 跑第一轮搜岗深筛预览** — 按 `{roles}`（`{cities}` · `{min_k}K+`）筛出 3～5 个靠谱自研岗、自动避开 {shield_cnt} 家前东家与外包，**先出破冰话术审阅单给你过目，未经你确认绝不点发送**",
+            "2. **粘贴单条岗位 JD 或 HR 消息让我参谋** — 替你排雷、挑匹配亮点、拟 1～2 句真人感回复草稿并记入本地台账",
+            f"3. **查看本地求职看板 / 微调筛选条件** — 随时调整薪资、城市、外包/驻场接受度{dash_note}",
+        ]
+
+    return {
+        "tier": tier,
+        "execution_mode": exec_mode,
+        "browser_provider": b_prov,
+        "recommended_action": recommended_action,
+        "agent_must_do": [
+            "1. 若尚未将确认后的个人求职事实写入 profile_facts_path，请立即写入，并顺手运行一次 `hiremate.py build-dashboard` 生成初始静态看板；",
+            "2. 【严禁建完档停步冷场】绝不能只回复一句“建档已完成”就结束！必须在同一条回复末尾向用户清晰展示下方 `user_reply_menu_markdown` 的 1 / 2 / 3 下一步操作菜单，让用户直接回一个 `1` 就能开跑首轮实战。",
+        ],
+        "options": options,
+        "user_reply_menu_markdown": "\n".join(menu_lines),
     }
 
 
@@ -652,7 +875,9 @@ def init_workspace(
     filter_onsite: bool | None = None,
     onsite_policy: str | None = None,
     execution_mode: str | None = None,
+    browser_provider: str | None = None,
     resume_source: str | None = None,
+    tier: str = "free",
     force: bool = False,
     reset_profile: bool = False,
 ) -> dict[str, Any]:
@@ -713,6 +938,8 @@ def init_workspace(
         init_patch["onsite_policy"] = onsite_policy
     if execution_mode is not None:
         init_patch["execution_mode"] = execution_mode
+    if browser_provider is not None:
+        init_patch["browser_provider"] = browser_provider
     if resume_source is not None:
         init_patch["resume_source"] = resume_source
     if init_patch:
@@ -749,16 +976,23 @@ def init_workspace(
     if not rt_path.exists():
         save_runtime_state(workspace, copy.deepcopy(DEFAULT_RUNTIME_STATE))
 
+    dash_file = str((workspace / "dashboard.html").resolve())
     return {
         "ok": True,
         "workspace": str(workspace),
         "config_path": str(cfg_file),
         "profile_facts_path": str(pf_path),
         "ledger_path": str(ledger_db_path(workspace)),
+        "dashboard_path": dash_file,
         "profile_created": profile_created,
         "profile_preserved": profile_preserved,
         "backups": backups,
         "config": saved_cfg,
+        "post_onboarding_guide": build_post_onboarding_guide(
+            saved_cfg,
+            tier=tier,
+            dashboard_path=dash_file,
+        ),
     }
 
 

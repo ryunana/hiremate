@@ -28,28 +28,33 @@ fi
 - **当前会话无需等待用户重启客户端**：直接调用 `python3 ~/.hiremate/skill/hiremate/hiremate.py` 即可立即执行后续步骤（仅 `dsh` 的 `/hiremate-status`、`/hiremate-login`、`/hiremate-dashboard` 三个快捷斜杠命令菜单在下次重载后显示，顺带提一句即可，不要停下等重启）；
 - 安装完成后，请立即读取 `~/.hiremate/skill/hiremate/SKILL.md` 按标准规约执行。
 
-## 第二步：先查本地状态 + 浏览器权限体检，生成《四项启动准备核对单》
+## 第二步：先查本地状态 + 浏览器通道能力体检，生成《四项启动准备核对单》
 
-先在本地自检你当前会话**是否具备正规浏览器操控工具**（如 `ego-browser`、宿主内置浏览器或 Chrome/Playwright MCP），然后运行以下三条命令探查当前状态与核对单：
+先在本地自检你当前宿主**自带的 Browser Use 是否同时支持「有头可见窗口（Headed）」与「登录态持久化（Persistent Profile）」**，然后运行以下三条命令探查当前状态与核对单：
 
 ```bash
-# 若你具备可用浏览器操控工具传 true，没有则传 false
-python3 ~/.hiremate/skill/hiremate/hiremate.py checklist --browser-capable <true|false>
+# 自带 Browser Use 同时具备「有头可见 + 持久化登录目录」传 true；缺任一项或无自带浏览器传 false
+python3 ~/.hiremate/skill/hiremate/hiremate.py checklist --builtin-headed-persistent <true|false>
 python3 ~/.hiremate/skill/hiremate/hiremate.py config show
 python3 ~/.hiremate/skill/hiremate/hiremate.py auth status
 ```
 
-- **【安全死红线】无浏览器操控工具时，绝对禁止使用 `curl`、`wget`、Python `urllib`/`requests` 或任何爬虫脚本请求 BOSS 直聘网页**（会秒触发反爬风控伤及用户账号）！
-- **若用户明确提到“登录 / 绑定账户 / 我买了 Pro / 开通 Pro”**：先运行 `python3 ~/.hiremate/skill/hiremate/hiremate.py auth login`（或 `auth upgrade`）弹出系统默认浏览器完成免验证码一键设备授权（此步仅弹网页，无需你有浏览器操控权限），确认 `tier` 状态后紧接着进入第三步（切勿登完就停下冷场）；
+- **【安全死红线】严禁使用 Headless 无头模式、每次新建空白临时窗口，或 `curl`/`wget`/Python `urllib`/`requests` 爬虫脚本请求 BOSS 直聘网页**（必触发反爬风控伤及用户账号）！
+- **若用户明确提到“登录 / 绑定账户 / 我买了 Pro / 开通 Pro”**：先运行 `python3 ~/.hiremate/skill/hiremate/hiremate.py auth login`（或 `auth upgrade`）弹出系统默认浏览器完成免验证码一键设备授权（此步仅弹网页，无需浏览器操控权限），确认 `tier` 状态后紧接着进入第三步（切勿登完就停下冷场）；
 - **若为普通免费版新用户（未提及登录或付费）**：**绝不强制注册登录，绝不生硬推销付费**！开源免费版免登录即可完整使用。
 
 ## 第三步：向用户展示《四项启动准备核对单（Checklist）》并完成 5 分钟建档
 
-若 `onboarding_completed` 为 `false`，请用清晰友好的中文向用户展示**《启动准备核对单》**，带用户一次性逐项核对：
+若 `onboarding_completed` 为 `false`（或 `browser_provider` 尚未选定），请用清晰友好的中文向用户展示**《启动准备核对单》**，带用户一次性核对：
 
-1. **`[核对项 1 · 浏览器操控权限]`**：
-   - **有权限**：告知已就绪，可直接复用已登录浏览器自动读在线简历、筛岗与收发消息；
-   - **无权限**：当场提前挑明，给出当前宿主的一句话开通方法（`WorkBuddy` 打开内置网页/`ego-browser` 授权；`dsh` / `Claude Code` / `Codex` 挂载 `ego-browser` 或 Chrome MCP；**提醒 Pro 用户自动盯盘必须开启此权限**）；若用户暂不开启，运行 `config set --execution-mode copilot` 切入**「副驾驶粘贴模式」**照常继续建档，绝不卡死。
+1. **`[核对项 1 · 浏览器操控通道选择]`**：
+   - **分支 A · 宿主自带 Browser Use【不支持】有头 + 持久化**（如无内置浏览器、仅支持 Headless 无头模式、或用完即毁的临时实例）：
+     - **直接跳过自带 Browser Use，安装并使用 `ego lite`（`ego-browser`），并明确告知用户原因**：BOSS 直聘风控极严，无头或临时浏览器极易掉登录并触发滑块/封控，因此已自动跳过宿主自带 Browser Use，切换为支持有头持久化登录态的 `ego lite`；
+     - 若本机已安装 `ego-browser`（`checklist` 返回 `ego_lite_installed: true`），直接运行 `config set --browser-provider ego_lite` 启用；若未安装，立即协助安装（macOS 可执行 `ego-browser` 技能内置 `install.sh` 拉起应用，Windows/通用引导下载 <https://lite.ego.app/> 并完成首次打开引导以注册 `ego-browser` 命令），就绪后运行 `config set --browser-provider ego_lite`（仅当用户明确表示当前受限环境无法装软件时，运行 `config set --execution-mode copilot` 切入「副驾驶粘贴模式」继续）。
+   - **分支 B · 宿主自带 Browser Use【支持】有头可见 + 登录态持久化**：
+     - 若 `browser_provider` 仍为 `"auto"`，**把选择权交给用户**，请用户按自身 Token 情况二选一：
+       1. **想节省 Token → 安装并使用 `ego lite`**：基于紧凑 DOM 引用快照，大幅降低单轮搜岗与 Pro 定时巡检 Token 消耗（未安装则顺手代装，选定后运行 `config set --browser-provider ego_lite`）；
+       2. **Token 多随便用 → 直接使用宿主自带 Browser Use**：免额外装任何软件开箱即用（底层多走视觉截图推理，Token 消耗较高，选定后运行 `config set --browser-provider builtin_browser_use`）。
 2. **`[核对项 2 · 招聘平台本人登录态]`**：确认日常浏览器已登录本人 BOSS 直聘账号。
 3. **`[核对项 3 · 必选硬门槛：至少一份真实简历（二选一，无简历绝不往下走）]`**：
    - **情况 A（有本地简历文件）**：请用户直接把 **1～3 份 PDF / Word / 文本简历**拖进对话（`--resume-source attachment_pdf`）；

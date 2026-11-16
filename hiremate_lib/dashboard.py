@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .ledger import STATUS_LABELS, VALID_STATUSES, JobLedger
-from .workspace import atomic_write_text, load_config, profile_facts_path
+from .workspace import DEFAULT_API_BASE, atomic_write_text, get_effective_api_base, load_config, profile_facts_path
 
 DECISION_MAKER_KEYWORDS = ("vp", "总监", "负责人", "合伙人", "总经理", "ceo", "cto", "创始人", "主管", "leader", "专家")
 
@@ -646,9 +646,21 @@ def render_dashboard_html(
         else ""
     )
 
+    portal_base = _safe_url(get_effective_api_base(config)) or DEFAULT_API_BASE
+    pro_checkout_url = f"{portal_base}/activate?plan=pro_buyout#subscribe-box"
+    pro_pricing_url = f"{portal_base}/#pricing"
+    top_upgrade_pill = (
+        ""
+        if is_pro
+        else (
+            f'<a class="header-pill badge-upgrade-cta" href="{pro_checkout_url}" '
+            f'target="_blank" rel="noopener noreferrer">⚡ ¥39.9 购买解锁 Pro →</a>'
+        )
+    )
+
     upgrade_banner_html = ""
     if not is_pro:
-        upgrade_banner_html = """
+        upgrade_banner_html = f"""
     <section class="upgrade-banner" aria-label="免费版与 Pro 专业版能力说明">
       <div class="upgrade-left">
         <div class="upgrade-title-row">
@@ -659,19 +671,67 @@ def render_dashboard_html(
           <strong>早鸟 ¥39.9 一次买断解锁全链路托管：</strong>
           <span>① 找岗全自动破冰 + 工作日错峰巡检</span>
           <span>② HR 未读消息真人感答疑（约面 / 谈薪 / 微信自动停手交回本人）</span>
-          <span>③ 猎头来信非对称核验 + 多版 PDF 简历路由</span>
+          <span>③ 100+ 深度外包词库 + 多版 PDF 简历路由</span>
           <span>④ <strong>一次买断长期有效，支持 2 台个人电脑同时绑定</strong></span>
         </div>
       </div>
       <div class="upgrade-right">
-        <div class="upgrade-cmd-label">免输验证码 · 对助手说一句话即可弹出浏览器配对：</div>
-        <code class="upgrade-cmd">登录求职助手并激活 Pro</code>
+        <div class="upgrade-btn-row">
+          <a class="upgrade-cta-btn" href="{pro_checkout_url}" target="_blank" rel="noopener noreferrer">¥39.9 立即购买解锁 Pro →</a>
+          <a class="upgrade-secondary-btn" href="{pro_pricing_url}" target="_blank" rel="noopener noreferrer">查看功能对比</a>
+        </div>
+        <div class="upgrade-cmd-label">
+          付完无需输卡密 · 对 AI 助手说
+          <button type="button" class="inline-copy-btn" data-copy="登录求职助手并同步 Pro 状态" data-done-label="✓ 已复制口令">登录求职助手并激活 Pro</button>
+          即可连上本机
+        </div>
       </div>
     </section>"""
 
     handed_off_jobs = [j for j in jobs if j.get("status") == "handed_off"]
     discovered_jobs = [j for j in jobs if j.get("status") == "discovered"]
     queue_count = len(handed_off_jobs) + len(discovered_jobs)
+
+    past_emps_for_guide = config.get("past_employers") or []
+    is_copilot_mode = str(config.get("execution_mode", "browser")) == "copilot"
+    first_search_cmd = (
+        "帮我评估下面这个 BOSS 岗位靠不靠谱（排外包+核对前东家+看匹配缺口），并拟一句真人感打招呼短句："
+        if is_copilot_mode
+        else "帮我在 BOSS 直聘按当前求职档案跑第一轮搜岗深筛预览（先出破冰审阅单给我确认，未经确认别点发送）"
+    )
+    second_reply_cmd = "帮我对照个人履历档案拟定下面这条 HR 追问的真人感回复，并记入求职台账："
+    onboarding_launchpad_html = ""
+    if not jobs:
+        onboarding_launchpad_html = f"""
+        <div class="launchpad-card">
+          <div class="launchpad-head">
+            <div>
+              <span class="launchpad-badge">🎉 档案已就绪 · 下一步开始实战</span>
+              <h2 class="launchpad-title">本地求职建档已完成，选一种方式跑通第一轮！</h2>
+              <p class="launchpad-sub">
+                已锁定方向 <strong>{_esc(roles_str)}</strong>（期望 <strong>{int(config.get("min_salary_k", 20))}K+</strong> · 已自动拉黑保护 <strong>{len(past_emps_for_guide)}</strong> 家前东家）。复制下方任一句发回你的 AI 助手即可开跑：
+              </p>
+            </div>
+          </div>
+          <div class="launchpad-grid">
+            <div class="launchpad-step">
+              <div class="launchpad-step-title">方式 1（推荐）· {"粘贴首个岗位试跑排雷" if is_copilot_mode else "去 BOSS 跑首轮搜岗深筛预览"}</div>
+              <p class="launchpad-step-desc">{"直接把看中的岗位 JD 发给助手，立即体验前东家防撞、外包识别与破冰话术草稿。" if is_copilot_mode else "自动在已登录浏览器按你的条件筛出 3～5 个靠谱自研岗，先出审阅单给你过目，绝不乱发。"}</p>
+              <div class="launchpad-cmd-bar">
+                <code>{_esc(first_search_cmd)}</code>
+                <button type="button" class="copy-action-btn" data-copy="{_esc(first_search_cmd)}" data-done-label="✓ 已复制，切回 AI 粘贴发送">复制口令开跑</button>
+              </div>
+            </div>
+            <div class="launchpad-step">
+              <div class="launchpad-step-title">方式 2 · 让助手参谋 HR 追问消息并记账</div>
+              <p class="launchpad-step-desc">把 HR 发来的问题贴给助手，严格按你真实履历拟 1～2 句自然回复，拒绝 AI 官腔与胡编。</p>
+              <div class="launchpad-cmd-bar">
+                <code>{_esc(second_reply_cmd)}</code>
+                <button type="button" class="copy-action-btn secondary" data-copy="{_esc(second_reply_cmd)}" data-done-label="✓ 已复制">复制参谋口令</button>
+              </div>
+            </div>
+          </div>
+        </div>"""
 
     if handed_off_jobs:
         handed_off_html = "\n".join(_render_job_card(j) for j in handed_off_jobs)
@@ -682,18 +742,20 @@ def render_dashboard_html(
             '<div class="empty-box empty-locked">'
             '<strong>Pro 专属托管队列（当前未开启自动消息巡检与答疑）</strong><br/>'
             '激活 Pro 后，求职助手会在工作日错峰自动答复 HR 常规背景追问并投递对应 PDF 简历；'
-            '一旦遇到「约面试时间 / 要微信电话 / 压薪谈底线」，将自动暂停回复并置顶在此处提醒你本人接管。'
+            '一旦遇到「约面试时间 / 要微信电话 / 压薪谈底线」，将自动暂停回复并置顶在此处提醒你本人接管。<br/>'
+            f'<a class="inline-pro-link" href="{pro_checkout_url}" target="_blank" rel="noopener noreferrer">'
+            '⚡ 前往开通 Pro 全托管（早鸟 ¥39.9 一次买断 · 无月费） →</a>'
             '</div>'
         )
     discovered_html = (
         "\n".join(_render_job_card(j, highlight_icebreaker=True) for j in discovered_jobs)
         if discovered_jobs
-        else '<div class="empty-box">当前暂无半自动待确认候选岗位。</div>'
+        else '<div class="empty-box">当前暂无半自动待确认候选岗位（复制上方口令发给桌面 AI 即可生成首轮候选审阅单）。</div>'
     )
     all_jobs_html = (
         "\n".join(_render_job_card(j, highlight_icebreaker=(j.get("status") == "discovered")) for j in jobs)
         if jobs
-        else '<div class="empty-box">本地账本暂无岗位记录。在 WorkBuddy 或 DSH 中运行单轮找岗预览后自动生成。</div>'
+        else '<div class="empty-box">本地账本暂无岗位记录。回到桌面 AI 发送「帮我在 BOSS 跑第一轮搜岗深筛预览」后自动入库生成。</div>'
     )
 
     # 筛选胶囊
@@ -1474,26 +1536,214 @@ def render_dashboard_html(
       background: #ffffff;
       border: 1px solid #dbeafe;
       border-radius: var(--radius-md);
-      padding: 8px 12px;
+      padding: 10px 14px;
       flex: 0 1 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      align-items: flex-start;
+    }}
+
+    .upgrade-btn-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+
+    .upgrade-cta-btn {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 16px;
+      border-radius: var(--radius-md);
+      background: #2563eb;
+      color: #ffffff;
+      font-size: 13.5px;
+      font-weight: 700;
+      text-decoration: none;
+      box-shadow: 0 2px 6px rgba(37, 99, 235, 0.22);
+      transition: background 0.15s ease, transform 0.12s ease;
+    }}
+
+    .upgrade-cta-btn:hover {{
+      background: #1d4ed8;
+      transform: translateY(-1px);
+    }}
+
+    .upgrade-secondary-btn {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 7px 12px;
+      border-radius: var(--radius-md);
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      color: #334155;
+      font-size: 12.5px;
+      font-weight: 600;
+      text-decoration: none;
+    }}
+
+    .upgrade-secondary-btn:hover {{
+      border-color: #2563eb;
+      color: #1d4ed8;
+      background: #ffffff;
+    }}
+
+    .badge-upgrade-cta {{
+      background: #2563eb;
+      color: #ffffff;
+      border: 1px solid #1d4ed8;
+      text-decoration: none;
+      transition: background 0.15s ease;
+    }}
+
+    .badge-upgrade-cta:hover {{
+      background: #1d4ed8;
     }}
 
     .upgrade-cmd-label {{
       font-size: 11.5px;
       color: #64748b;
-      margin-bottom: 3px;
+      line-height: 1.5;
     }}
 
-    .upgrade-cmd {{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-      font-size: 12.5px;
-      font-weight: 600;
+    .inline-copy-btn {{
+      appearance: none;
+      border: 1px solid #bfdbfe;
+      background: #eff6ff;
       color: #1d4ed8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 1px 7px;
+      border-radius: 5px;
+      cursor: pointer;
+    }}
+
+    .inline-copy-btn:hover {{
+      background: #dbeafe;
+    }}
+
+    .inline-pro-link {{
+      display: inline-block;
+      margin-top: 8px;
+      color: #1d4ed8;
+      font-weight: 700;
+      text-decoration: none;
+    }}
+
+    .inline-pro-link:hover {{
+      text-decoration: underline;
+    }}
+
+    .launchpad-card {{
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      border: 1.5px solid #93c5fd;
+      border-radius: var(--radius-lg);
+      padding: 20px 22px;
+      margin-bottom: 20px;
+      box-shadow: 0 6px 20px rgba(37, 99, 235, 0.06);
+    }}
+
+    .launchpad-badge {{
+      display: inline-block;
+      background: #dbeafe;
+      color: #1e40af;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 3px 10px;
+      border-radius: 999px;
+      margin-bottom: 8px;
+    }}
+
+    .launchpad-title {{
+      font-size: 18px;
+      font-weight: 800;
+      color: var(--text-main);
+      margin-bottom: 4px;
+    }}
+
+    .launchpad-sub {{
+      font-size: 13.5px;
+      color: var(--text-secondary);
+      margin-bottom: 14px;
+    }}
+
+    .launchpad-grid {{
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }}
+
+    .launchpad-step {{
+      background: #ffffff;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 10px;
+    }}
+
+    .launchpad-step-title {{
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-main);
+    }}
+
+    .launchpad-step-desc {{
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      line-height: 1.55;
+    }}
+
+    .launchpad-cmd-bar {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      padding: 8px 10px;
+      flex-wrap: wrap;
+    }}
+
+    .launchpad-cmd-bar code {{
+      font-size: 12px;
+      color: #1e293b;
+      flex: 1 1 220px;
+      word-break: break-all;
+    }}
+
+    .copy-action-btn {{
+      appearance: none;
+      border: 1px solid #1d4ed8;
+      background: #2563eb;
+      color: #ffffff;
+      font-size: 12.5px;
+      font-weight: 700;
+      padding: 6px 12px;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+
+    .copy-action-btn.secondary {{
+      background: #ffffff;
+      color: #1d4ed8;
+    }}
+
+    .copy-action-btn:hover {{
+      opacity: 0.92;
     }}
 
     .lock-pill {{
       display: inline-block;
-      padding: 1px 7px;
+      padding: 1px 8px;
       font-size: 11px;
       font-weight: 600;
       border-radius: 999px;
@@ -1501,6 +1751,11 @@ def render_dashboard_html(
       color: #92400e;
       border: 1px solid #fde68a;
       margin-left: 6px;
+      text-decoration: none;
+    }}
+
+    a.lock-pill:hover {{
+      background: #fde68a;
     }}
 
     .pro-active-pill {{
@@ -1586,6 +1841,7 @@ def render_dashboard_html(
           {demo_banner}
           <span class="header-pill badge-mode">{_esc(mode_badge)}</span>
           <span class="header-pill {tier_cls}">{_esc(tier_badge)}</span>
+          {top_upgrade_pill}
         </div>
       </div>
     </header>
@@ -1638,6 +1894,7 @@ def render_dashboard_html(
 
     <main>
       <section id="tab-queue" class="tab-panel active">
+        {onboarding_launchpad_html}
         <div class="section-block">
           <div class="section-header">
             <h2 class="section-title">待本人约面 / 谈薪 / 决策接管（{len(handed_off_jobs)}）</h2>
@@ -1684,7 +1941,7 @@ def render_dashboard_html(
           <div class="strategy-card">
             <h3>自动化档位与作息护栏 {"<span class='pro-active-pill'>Pro 托管已生效</span>" if is_pro else "<span class='lock-pill'>部分需升级 Pro</span>"}</h3>
             <div class="kv-list">
-              <div class="kv-item"><span class="kv-key">交互运行模式</span><span class="kv-val">{"副驾驶粘贴协同（无浏览器操控权限兜底）" if str(config.get("execution_mode", "browser")) == "copilot" else "浏览器直连自动化（复用已登录窗口）"}</span></div>
+              <div class="kv-item"><span class="kv-key">交互运行模式</span><span class="kv-val">{"副驾驶粘贴协同（无浏览器操控权限兜底）" if str(config.get("execution_mode", "browser")) == "copilot" else ("浏览器直连自动化 · ego lite（省 Token 持久化窗口）" if str(config.get("browser_provider", "auto")) == "ego_lite" else ("浏览器直连自动化 · 宿主自带 Browser Use（有头持久化）" if str(config.get("browser_provider", "auto")) == "builtin_browser_use" else "浏览器直连自动化（复用已登录窗口）"))}</span></div>
               <div class="kv-item"><span class="kv-key">简历底座形态</span><span class="kv-val">{"仅平台在线简历（建议在 BOSS 在线简历页生成附件 PDF）" if (str(config.get("resume_source", "")) == "online_only" or not bool(config.get("has_attachment_resume", True))) else "平台在线 + PDF 附件简历齐全"}</span></div>
               <div class="kv-item"><span class="kv-key">主动找岗模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_discover", "semi")))) if is_pro else "半自动确认（全自动破冰需 Pro）"}</span></div>
               <div class="kv-item"><span class="kv-key">消息答疑模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_reply", "semi")))) if is_pro else "未启用（Pro 解锁半自动/全自动答疑）"}</span></div>
