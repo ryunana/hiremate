@@ -124,8 +124,9 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
      - **免费版用户**：调用 `screen-basic --company "<公司>" --title "<岗位>" --salary "<薪资>" --company-intro "<公司简介>" --jd "<JD文本>"` 并结合 `profile_facts.md` 归纳匹配依据与缺口；
      - 凡被判定跳过的岗位，用 `ledger upsert-job` 记为 `status="screened_skip"`（写明 `business_nature` 如 `"驻场外包"` 以便后续同公司直接秒跳）。
 4. **分档执行破冰**：
+   - **初次破冰语气与对象区分（适度客气 + 纯文本真人感）**：刚开始打招呼时保持得体礼貌（如以“您好，看咱们在招……”自然起头，温和邀聊；不生硬自报姓名、不用“贵司/尊敬的”公文腔、**严禁出现 `**加粗**` 等 Markdown 符号或 `1. 2.` 分点列表**）。结合抓取到的 `recruiter_title` 微调侧重点——面对 **HR / 招聘专员**简明对齐年限、行业与目标方向硬指标；面对 **业务负责人 / VP / 总监直招**则直接点出 1～2 个解决过的核心业务闭环与落地指标。若岗位对是否外包/驻场存疑（且用户排斥外包/驻场），可在破冰或首轮互动时顺带礼貌确认一句是否为自研直签、是否需驻场；**严禁在前期询问薪资结构/几薪、涨薪、社保缴纳、考勤打卡加班或前任离职/裁员八卦**。对方未回复前**严禁二次追问刷屏**（如“在吗”）。
    - **半自动审阅档（`mode_discover=semi` 或免费版）**：将通过深筛的候选以 `status="discovered"` 存入 `ledger upsert-job`，在对话输出精简审阅单（序号、岗位+薪资、公司规模与自研性质、招聘者姓名及职务头衔、核心匹配点、潜在缺口、拟发 1–2 句第一人称破冰短句）。用户回复序号后，回到浏览器点击对应岗位的「立即沟通」并发送破冰短句，确认消息出现在会话框后执行 `ledger transition --job-id <id> --status opening_sent`。
-   - **Pro 全自动定额档（`mode_discover=auto`）**：**开跑前必须先调用一次 `pro patrol-gate` 核验 `discover_due` 与当日剩余配额**（若处于夜间宵禁、90 分钟冷却期内或已满 `max_per_day=20` 上限，严禁强行自动打招呼，降级输出 `semi` 候选审阅单）；确认放行后，对 `strong_match` 岗位直接点击「立即沟通」发送 1–2 句破冰短句（不自报姓名、不写公文套话），每成功送达 1 个立即记账 `opening_sent`；**一旦确认送达满本轮配额（默认 5 个）立即停手**，并执行 `pro mark-discovered` 记录找岗冷却时间戳。
+   - **Pro 全自动定额档（`mode_discover=auto`）**：**开跑前必须先调用一次 `pro patrol-gate` 核验 `discover_due` 与当日剩余配额**（若处于夜间宵禁、90 分钟冷却期内或已满 `max_per_day=20` 上限，严禁强行自动打招呼，降级输出 `semi` 候选审阅单）；确认放行后，对 `strong_match` 岗位直接点击「立即沟通」发送 1–2 句得体破冰短句，每成功送达 1 个立即记账 `opening_sent`；**一旦确认送达满本轮配额（默认 5 个）立即停手**，并执行 `pro mark-discovered` 记录找岗冷却时间戳。
 
 ### 4. 开启工作日错峰自动巡检（挂载宿主原生定时任务 · Pro 专属）
 当已解锁 Pro 的用户提出「开启自动巡检」「帮我挂上工作日定时盯盘」时，**不要自己写死循环 `sleep`**，而是直接调用当前宿主的原生定时任务机制挂载：
@@ -142,26 +143,32 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - **处理任何会话前先定位账本记录**：运行 `ledger list --search "<公司名>"` 获取 `job_id`；若为 HR 主动打招呼（inbound）或历史旧会话尚无记录，先运行 `ledger upsert-job --job-json '{"company":"<公司>","title":"<岗位>","recruiter_name":"<招聘者>","channel":"inbound","status":"connected"}'` 拿到 `job_id`（后续调用 `ledger transition` 时也可附带 `--company "<公司>" --title "<岗位>"` 自动兜底建档）；
    - 外包 / 派遣 / 驻场岗位主动打招呼：先看 `config show` 中的 `outsourcing_policy` 与 `onsite_policy`——若为 `block_all`（默认排除）则直接静默忽略，不回消息、不发简历；若用户已设为 `allow_all` 或 `inbound_only`（接受外包或驻场机会），则调 `pro evaluate-job`（传 `is_inbound_recruiter: true`）按岗位方向与薪资正常评估接洽，并在备注中客观标明岗位性质；
    - 猎头主动打招呼：调 `pro evaluate-job`（传 `is_inbound_recruiter: true`）；若对方只问在不在看机会尚未发 JD，礼貌短句请其发具体岗位职责与客户方向；若发来完全不对口岗位（如销售/保险）则静默跳过。
-3. **强制核对个人事实档案 + 云端话术守卫**：
-   - 先读取 `profile_facts.md` 核对招聘者提问的经历、指标、工具或年限：
-     - 档案明确有记载 → 拟定 15～60 字第一人称日常短句草稿（严禁写“您好我是XX”“贵司”“还需跟本人确认”）；
+3. **Agent 语义理解主判 + 个人事实核对 + 云端确定性话术守卫（双保险闭环）**：
+   - **分阶段语气、格式铁律与常识边界**：
+     - **初次接洽 vs 后续交流**：首回陌生 HR/猎头来信适度客气得体（缺 JD 时礼貌询问具体岗位职责与业务方向）；已建联进入业务经验交流后脱去客套寒暄，回归自然平实的同行正常对话（通常 15～85 字，面对 HR 偏重硬性匹配度，面对业务直招偏重实战闭环）；对方已读未回时严禁二次催促；
+     - **纯文本防露馅**：聊天回复必须是连贯口语纯文本，**严禁包含 `**加粗**`、反引号等 Markdown 符号或 `1. 2.` 分点编号列表**；
+     - **前期允许询问 vs 严禁询问**：当岗位是否属于**外包/派遣/OD 或驻场/外派**存疑且用户排斥此类岗位时，允许在前期礼貌确认；但**前期严禁主动盘问薪资结构/几薪、能否涨薪、社保公积金如何缴纳、上下班打卡/加班/年假补贴或前任离职/裁员八卦**；
+   - **先由你（宿主 Agent）结合完整上下文做语义判断与 `profile_facts.md` 事实核对**：
+     - 档案明确有记载（包括常规在职/离职状态与标准交接到岗周期，如“在职，offer 后 2-4 周到岗”）→ 拟定第一人称自然短句草稿；
      - 档案明确写没有该细分经验 → 坦诚简短说明未直接做过该细分块，并视情况点出相邻可迁移经验；
-     - **档案完全未提及、拿不准真假（超纲问题）** → **严禁顺着 JD 瞎编**！调用 `pro guard-reply` 时在 `conversation` 中传 `"unverified_fact": true`；
-   - 发送任何回复前**必须调用**：
+     - **对方回复证实为外包/派遣/OD 或需驻场（且与用户排雷偏好冲突）** → **严禁继续推进或发简历**！拟定一句得体礼貌的谢绝话术（如“好的了解了，目前主要看自研非驻场方向的机会，感谢告知，祝招人顺利！”），并在调用 `pro guard-reply` 时传 `"confirmed_work_mode_mismatch": true`；
+     - **语义识别出需本人决策的场景**（约面试时间、索要微信/手机号、询问期望薪资/上家薪资构成/压薪底线、要求立即/几天内紧急到岗、发送在线测评/笔试题/登记表、索要作品集/GitHub、或盘问婚育/年龄/住址等个人隐私）→ 严禁代答，可在 `conversation` 中传 `"handoff_intent": "<具体原因>"`；
+     - **档案完全未提及、拿不准真假（超纲问题）** → **严禁顺着 JD 瞎编**！在 `conversation` 中传 `"unverified_fact": true`；
+   - 发送任何回复前**必须调用云端确定性守卫兜底**：
      ```bash
-     python3 "<SKILL_DIR>/hiremate.py" pro guard-reply --input-json '{"job":{...},"conversation":{"incoming_message":"...","draft_reply":"...","unverified_fact":false}}'
+     python3 "<SKILL_DIR>/hiremate.py" pro guard-reply --input-json '{"job":{...},"conversation":{"incoming_message":"...","draft_reply":"...","unverified_fact":false,"confirmed_work_mode_mismatch":false,"handoff_intent":""}}'
      ```
-   - **收到拒信收尾（`is_rejection_closing: true`）**：按 `sanitized_suggestion` 回复一句礼貌祝愿，执行 `ledger transition --job-id <id> --company "<公司>" --title "<岗位>" --status closed_rejected`，后续不再触发；
-   - **触发人工接管红线（`handoff_required: true`：约面试时间、索要微信/电话、压薪谈底线、异地承诺或超纲未记载事实）**：**严禁代回任何文字**！立即运行：
+   - **收到拒信或外包不符礼貌谢绝收尾（`is_rejection_closing: true` 或 `is_polite_decline_closing: true`）**：按 `sanitized_suggestion` 回复一句得体礼貌收尾，执行 `ledger transition --job-id <id> --company "<公司>" --title "<岗位>" --status closed_rejected`，后续不再触发；
+   - **触发人工接管红线（`handoff_required: true`：约面、加微信/电话、问期望/上家薪资或紧急到岗、测评笔试/作品集、婚育隐私或超纲未记载事实）**：**严禁代回任何文字**！立即运行：
      ```bash
      python3 "<SKILL_DIR>/hiremate.py" ledger transition --job-id <id> --company "<公司>" --title "<岗位>" --status handed_off --note "<接管原因>"
      ```
      （该命令会自动弹出本机桌面系统通知并在看板置顶），同时在对话里向用户汇报公司、岗位、对方原话与建议答法；当用户本人处理完毕确认面试或进入跟进阶段后，可运行 `ledger transition --job-id <id> --status interview_scheduled --note "<面试时间/进展>"` 将其移出顶部待办警报并持续保留同公司防撞车保护；
    - **草稿违规修正（`reply_approved: false`）**：按 `violations` 修正后重新过一遍 `guard-reply`，通过后再按 `mode_reply`（`semi` 推给用户确认或写入备注 / `auto` 直接填入聊天框发送）执行。
-4. **线上多版附件简历精准投递与四态拆账**：
-   - 双方产生实质互动后先记 `connected`；
-   - **场景 A（招聘者在聊天窗发来「想要您的附件简历」卡片）**：检查 `recommended_resume` 是否与默认附件一致——若一致可直接点击卡片上的「同意」；若需发另一方向的 PDF 简历，点击输入框上方工具栏「发简历」，在弹窗列表中勾选匹配 `recommended_resume` 文件名的附件点确认发出。因对方已主动求简历，发出后聊天框出现已发送附件气泡即可记为 `resume_delivered`（传 `--resume-used "<文件名>"`）；
-   - **场景 B（沟通顺畅主动递交简历）**：点击工具栏「发简历」勾选 `recommended_resume` 发出请求，此时对方尚未点同意，**只许记为 `resume_requested`**！待后续巡检看到聊天框出现「对方已接收/同意你的附件简历」系统提示后，再执行 `ledger transition --job-id <id> --status resume_delivered --resume-used "<文件名>"`。
+4. **线上多版附件简历精准投递、社交分寸与四态拆账**：
+   - 双方产生实质互动后先记 `connected`；**注意社交分寸**：若当前刚向对方询问“是否为外包/驻场”或“具体岗位 JD”，在对方回复确认前**暂缓递交附件简历**；
+   - **场景 A（招聘者在聊天窗发来「想要您的附件简历」卡片或口头求简历）**：确认岗位方向匹配且无外包冲突后，若 `recommended_resume` 与默认附件一致可直接点卡片「同意」，否则从工具栏「发简历」勾选 `recommended_resume` 发出，**并顺手配一句简短自然的附言**（如“好的，附件简历刚发您了，方便时看下～”），避免干巴巴只甩文件气泡。因对方已主动求简历，发出后即可记为 `resume_delivered`（传 `--resume-used "<文件名>"`）；
+   - **场景 B（沟通顺畅主动递交简历）**：点击工具栏「发简历」勾选 `recommended_resume` 发出请求并配简短礼貌附言，此时对方尚未点同意，**只许记为 `resume_requested`**！待后续巡检看到聊天框出现「对方已接收/同意你的附件简历」系统提示后，再执行 `ledger transition --job-id <id> --status resume_delivered --resume-used "<文件名>"`。
 5. **收尾解锁**：若本轮顺带执行了到期的主动找岗（`discover_due: true`），完成后运行 `pro mark-discovered`；最后务必运行 `pro mark-idle`。
 
 ### 6. 刷新本地转化漏斗看板与导出原生 Excel 台账
