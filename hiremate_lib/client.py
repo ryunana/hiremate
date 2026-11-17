@@ -278,7 +278,7 @@ def _http_json(
 ) -> tuple[int, dict[str, Any]]:
     headers: dict[str, str] = {
         "Accept": "application/json",
-        "User-Agent": "hiremate-open-cli/0.6.1",
+        "User-Agent": "hiremate-open-cli/0.6.2",
     }
     raw_body: bytes | None = None
     if body is not None:
