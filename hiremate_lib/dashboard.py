@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .ledger import STATUS_LABELS, VALID_STATUSES, JobLedger
 from .workspace import DEFAULT_API_BASE, atomic_write_text, get_effective_api_base, load_config, profile_facts_path
 
@@ -609,6 +610,7 @@ def render_dashboard_html(
     pro_meta: dict[str, Any] | None = None,
     is_demo: bool = False,
     snapshot_time: str | None = None,
+    update_notice: dict[str, Any] | None = None,
 ) -> str:
     """渲染完整内联、零外部依赖的静态投递看板 HTML。"""
     snap = snapshot_time or datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -645,6 +647,45 @@ def render_dashboard_html(
         if is_demo
         else ""
     )
+
+    has_update = bool((not is_demo) and isinstance(update_notice, dict) and update_notice.get("update_available"))
+    latest_ver_str = str((update_notice or {}).get("latest_version") or __version__)
+    cur_ver_str = str((update_notice or {}).get("current_version") or __version__)
+    if has_update:
+        version_pill_html = (
+            f'<a class="header-pill badge-update-ready" href="#release-update-banner">'
+            f'🚀 新版 v{_esc(latest_ver_str)} 可升级</a>'
+        )
+    else:
+        version_pill_html = f'<span class="header-pill badge-version">v{_esc(__version__)}</span>'
+
+    release_update_banner_html = ""
+    if has_update and isinstance(update_notice, dict):
+        is_req = bool(update_notice.get("required"))
+        pub_date = str(update_notice.get("published_at") or "").strip()
+        raw_hl = [str(x).strip() for x in (update_notice.get("highlights") or []) if str(x).strip()][:3]
+        hl_items_html = "".join(f"<span>• {_esc(item)}</span>" for item in raw_hl)
+        if not hl_items_html:
+            hl_items_html = "<span>• 包含最新功能升级、体验优化与排雷规则迭代</span>"
+        tag_label = "必升更新" if is_req else "发现新版本"
+        banner_mod_cls = " release-update-required" if is_req else ""
+        pub_suffix = f" · 发布于 {_esc(pub_date)}" if pub_date else ""
+        release_update_banner_html = f"""
+    <section id="release-update-banner" class="release-update-banner{banner_mod_cls}" aria-label="插件新版本更新提醒">
+      <div class="release-update-left">
+        <div class="release-update-head">
+          <span class="release-update-tag">{tag_label}</span>
+          <strong class="release-update-title">求职助手 v{_esc(latest_ver_str)} 已发布</strong>
+          <span class="release-update-meta">当前版本 v{_esc(cur_ver_str)}{pub_suffix} · 升级完整保留本地简历与账本数据</span>
+        </div>
+        <div class="release-update-highlights">{hl_items_html}</div>
+      </div>
+      <div class="release-update-right">
+        <button type="button" class="release-copy-btn" data-copy="请帮我升级求职助手到最新版本" data-done-label="✓ 已复制口令，粘贴发给助手即可自动更新">一键复制对话升级口令</button>
+        <span class="release-cmd-hint">DSH 亦可直接输入 <code>/hiremate-update</code></span>
+      </div>
+    </section>
+"""
 
     portal_base = _safe_url(get_effective_api_base(config)) or DEFAULT_API_BASE
     pro_checkout_url = f"{portal_base}/activate?plan=pro_buyout#subscribe-box"
@@ -918,6 +959,133 @@ def render_dashboard_html(
       background: var(--accent-amber-bg);
       color: var(--accent-amber);
       border: 1px solid #fcd34d;
+    }}
+
+    .badge-version {{
+      background: #f8fafc;
+      color: #64748b;
+      border: 1px solid var(--border);
+      font-variant-numeric: tabular-nums;
+    }}
+
+    .badge-update-ready {{
+      background: #ecfdf5;
+      color: #047857;
+      border: 1px solid #6ee7b7;
+      text-decoration: none;
+    }}
+
+    .badge-update-ready:hover {{
+      background: #d1fae5;
+    }}
+
+    .release-update-banner {{
+      background: linear-gradient(90deg, #ecfdf5 0%, #f0fdf4 55%, #ffffff 100%);
+      border: 1px solid #86efac;
+      border-radius: var(--radius-lg);
+      padding: 14px 20px;
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      box-shadow: var(--shadow-sm);
+    }}
+
+    .release-update-banner.release-update-required {{
+      background: linear-gradient(90deg, #fffbeb 0%, #fef3c7 45%, #ffffff 100%);
+      border-color: #fbbf24;
+    }}
+
+    .release-update-left {{
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      min-width: 0;
+      flex: 1 1 420px;
+    }}
+
+    .release-update-head {{
+      display: flex;
+      align-items: center;
+      gap: 8px 10px;
+      flex-wrap: wrap;
+    }}
+
+    .release-update-tag {{
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #059669;
+      color: #ffffff;
+      font-size: 11.5px;
+      font-weight: 700;
+    }}
+
+    .release-update-required .release-update-tag {{
+      background: #d97706;
+    }}
+
+    .release-update-title {{
+      font-size: 14.5px;
+      color: #064e3b;
+    }}
+
+    .release-update-required .release-update-title {{
+      color: #78350f;
+    }}
+
+    .release-update-meta {{
+      font-size: 12.5px;
+      color: var(--text-secondary);
+    }}
+
+    .release-update-highlights {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 16px;
+      font-size: 13px;
+      color: #1e293b;
+    }}
+
+    .release-update-right {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 5px;
+      flex-shrink: 0;
+    }}
+
+    .release-copy-btn {{
+      appearance: none;
+      border: 1px solid #059669;
+      background: #059669;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 7px 14px;
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }}
+
+    .release-copy-btn:hover {{
+      background: #047857;
+    }}
+
+    .release-cmd-hint {{
+      font-size: 12px;
+      color: var(--text-muted);
+    }}
+
+    .release-cmd-hint code {{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: rgba(15, 23, 42, 0.06);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: #0f172a;
     }}
 
     .snapshot-time {{
@@ -1805,6 +1973,9 @@ def render_dashboard_html(
       .launchpad-grid {{
         grid-template-columns: 1fr;
       }}
+      .release-update-right {{
+        align-items: flex-start;
+      }}
       .tab-btn {{
         padding: 7px 11px;
         font-size: 13px;
@@ -1844,12 +2015,14 @@ def render_dashboard_html(
         </div>
         <div class="header-badges">
           {demo_banner}
+          {version_pill_html}
           <span class="header-pill badge-mode">{_esc(mode_badge)}</span>
           <span class="header-pill {tier_cls}">{_esc(tier_badge)}</span>
           {top_upgrade_pill}
         </div>
       </div>
     </header>
+    {release_update_banner_html}
     {upgrade_banner_html}
 
     <section class="kpi-grid" aria-label="求职转化核心漏斗">
@@ -2097,6 +2270,7 @@ def build_dashboard_file(
     tier: str = "free",
     demo_tier: str = "pro",
     pro_meta: dict[str, Any] | None = None,
+    update_notice: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从本地工作区（或虚构示例数据集）构建只读静态 HTML 看板。"""
     if demo:
@@ -2132,6 +2306,7 @@ def build_dashboard_file(
         tier=effective_tier,
         pro_meta=effective_meta,
         is_demo=demo,
+        update_notice=update_notice,
     )
     resolved_out.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(resolved_out, html_content)

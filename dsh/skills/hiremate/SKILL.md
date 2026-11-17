@@ -16,9 +16,10 @@ python3 "<SKILL_DIR>/hiremate.py" <子命令>
 ```
 
 用户在 DSH 输入框还可直接调用零模型消耗的原生斜杠命令：
-- `/hiremate-status`：查看免费版 / Pro 买断状态与本地五阶转化漏斗汇总；
+- `/hiremate-status`：查看免费版 / Pro 买断状态、新版本提醒与本地五阶转化漏斗汇总；
 - `/hiremate-login [可选 pro]`：一键弹出浏览器免验证码设备配对页，或传入 `pro` 直接打开 ¥69 在线买断收银台（扫码支付 3 秒自动绑定账户）；
-- `/hiremate-dashboard`：一键生成并刷新本地只读静态求职看板 `dashboard.html`。
+- `/hiremate-dashboard`：一键生成并刷新本地只读静态求职看板 `dashboard.html`；
+- `/hiremate-update [可选 check]`：一键从 Gitee 主源（失败自动切 GitHub 备源）无损自动升级至最新版本（保留全部本地简历与账本数据）。
 
 ## 二、核心安全铁律与新用户 Checklist 引导闭环 SOP
 
@@ -49,4 +50,4 @@ python3 "<SKILL_DIR>/hiremate.py" <子命令>
    - 用户要求开启自动巡检时，在 DSH 定时调度中挂载**周一至周五 `09:00–12:00`、`14:00–18:00` 每 10～15 分钟**运行的轻量任务（若 `mode_reply=semi`，后台巡检只拉未读、记账、把草稿写进 `note`，绝不自动发出）；
    - **Agent 语义主判 + 云端确定性守卫双保险**：首次接洽适度客气，建联后聊具体经验脱去寒暄自然交流（禁 Markdown/分点列表）；前期允许在岗位性质模糊时礼貌确认**是否外包/派遣或是否驻场**（待对方确认前暂缓递简历；若对方证实为外包/驻场且与偏好冲突，拟礼貌谢绝语并传 `"confirmed_work_mode_mismatch": true` 归档 `closed_rejected`），但**前期严禁询问薪资结构/几薪、涨薪、社保缴纳、打卡加班或前任裁员八卦**；发简历时顺手配一句自然附言；
    - 首步必跑 `pro patrol-gate`（`allow_unread_check=false` 立即静默退出）；放行后跑 `pro mark-busy` → 先查未读消息与简历回执（先用 `ledger list --search "<公司>"` 找 `job_id`，被动新会话先 `ledger upsert-job` 建档；调 `pro evaluate-job` 时传 `"is_inbound_recruiter": true`） → 结合上下文与 `profile_facts.md` 核对（常规在职/交接周期可自然答复；遇约面、加微信/电话、问期望/上家薪资、测评笔试/作品集、婚育隐私可传 `"handoff_intent"`，超纲不确定事实传 `"unverified_fact": true`）并过 `pro guard-reply` → 遇 `handoff_required: true` 严禁代回，跑 `ledger transition --job-id <id> --company "<公司>" --title "<岗位>" --status handed_off --note "<原因>"` 触发系统弹窗与看板置顶提醒本人（本人敲定面试后可流转至 `--status interview_scheduled`） → 严格区分 `resume_requested` 与确认接收后的 `resume_delivered` → 收尾必跑 `pro mark-idle`。
-5. **看板与原生 Excel 导出**：运行 `build-dashboard` 刷新静态看板，运行 `ledger export-excel --out <路径.xlsx>` 导出冻结表头的原生 Excel 工作簿。
+5. **看板、原生 Excel 导出与新版本升级提醒**：运行 `build-dashboard` 刷新静态看板，运行 `ledger export-excel --out <路径.xlsx>` 导出冻结表头的原生 Excel 工作簿；当任何命令返回 `update_notice`（`update_available: true`）时，在回复末尾顺带告知新版本号与亮点，提醒用户直接输入 `/hiremate-update` 或说「升级求职助手」（运行 `hiremate.py update`）一键完成无损自动更新。

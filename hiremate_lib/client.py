@@ -24,6 +24,7 @@ import webbrowser
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .ledger import JobLedger
 from .normalize import deduplicate_company_list, employer_shield_match
 from .workspace import (
@@ -278,7 +279,7 @@ def _http_json(
 ) -> tuple[int, dict[str, Any]]:
     headers: dict[str, str] = {
         "Accept": "application/json",
-        "User-Agent": "hiremate-open-cli/0.6.2",
+        "User-Agent": f"hiremate-open-cli/{__version__}",
     }
     raw_body: bytes | None = None
     if body is not None:

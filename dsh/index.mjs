@@ -34,7 +34,10 @@ function resolveCliPath(skillDir) {
 
 let cachedPythonSpec = null
 
-async function runHiremateCli(cliPath, args) {
+async function runHiremateCli(skillDir, args, options = {}) {
+  const cliPath = resolveCliPath(skillDir)
+  const timeoutMs = options.timeoutMs || 15_000
+  const extraEnv = options.env || {}
   const candidates = cachedPythonSpec
     ? [cachedPythonSpec]
     : [
@@ -47,9 +50,9 @@ async function runHiremateCli(cliPath, args) {
   for (const [bin, prefixArgs] of candidates) {
     try {
       const { stdout } = await execFileAsync(bin, [...prefixArgs, cliPath, ...args], {
-        timeout: 15_000,
+        timeout: timeoutMs,
         maxBuffer: 2 * 1024 * 1024,
-        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1', ...extraEnv },
       })
       cachedPythonSpec = [bin, prefixArgs]
       return JSON.parse(stdout)
@@ -75,7 +78,6 @@ async function runHiremateCli(cliPath, args) {
 export function apply(ctx) {
   const base = new URL('./skills/hiremate/', import.meta.url)
   const skillDir = fileURLToPath(base)
-  const cliPath = resolveCliPath(skillDir)
   const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
   const userSkillMd = join(dshHome, 'skills', 'hiremate', 'SKILL.md')
 
@@ -105,10 +107,11 @@ export function apply(ctx) {
           description: '查看「求职助手」当前版本（免费版 / Pro 剩余天数与更新权益）及本地投递漏斗汇总',
           handler: async () => {
             try {
+              const noUpdOpt = { env: { HIREMATE_DISABLE_UPDATE_CHECK: '1' } }
               const [auth, sumResp, cfgResp] = await Promise.all([
-                runHiremateCli(cliPath, ['auth', 'status']),
-                runHiremateCli(cliPath, ['ledger', 'summary']),
-                runHiremateCli(cliPath, ['config', 'show']),
+                runHiremateCli(skillDir, ['auth', 'status'], noUpdOpt),
+                runHiremateCli(skillDir, ['ledger', 'summary'], noUpdOpt),
+                runHiremateCli(skillDir, ['config', 'show']),
               ])
               const f = sumResp?.summary?.funnel || {}
               const cfg = cfgResp?.config || {}
@@ -151,7 +154,13 @@ export function apply(ctx) {
                 `PDF简历已送达 ${f.pdf_delivered_total ?? 0}`,
                 `待本人约面/决策 ${f.handed_off_pending ?? 0}`,
               ].join(' ｜ ')
-              const lines = ['【求职助手状态】', tierLine]
+              const verTag = cfgResp?.version ? ` v${cfgResp.version}` : ''
+              const upd = cfgResp?.update_notice || auth?.update_notice || sumResp?.update_notice || null
+              const updateLine = upd?.update_available
+                ? `🚀 发现新版本 v${upd.latest_version}（当前 v${upd.current_version}）：${(upd.highlights || []).slice(0, 2).join('；') || '含最新功能与规则升级'}\n👉 直接输入 /hiremate-update 即可一键无损自动更新！`
+                : null
+              const lines = [`【求职助手状态${verTag}】`, tierLine]
+              if (updateLine) lines.push(updateLine)
               if (onboardLine) lines.push(onboardLine)
               if (proUpgradeHint) lines.push(proUpgradeHint)
               lines.push(prefLine, `投递漏斗：${funnelLine}`)
@@ -170,7 +179,7 @@ export function apply(ctx) {
             const rawArg = String(invocation?.args || invocation?.input || '').trim().toLowerCase()
             try {
               if (rawArg === 'pro' || rawArg === 'upgrade' || rawArg === 'buyout') {
-                const upg = await runHiremateCli(cliPath, ['auth', 'upgrade', '--plan', 'pro_buyout'])
+                const upg = await runHiremateCli(skillDir, ['auth', 'upgrade', '--plan', 'pro_buyout'])
                 const bindHint = upg?.email
                   ? '支付完成后买断权益永久绑定至当前账户；随后运行 /hiremate-status 即可同步生效。'
                   : '支付完成后请再运行一次 /hiremate-login 将本机绑定至你的账户（无需输入任何激活码）。'
@@ -184,7 +193,7 @@ export function apply(ctx) {
                 }
               }
 
-              const pair = await runHiremateCli(cliPath, ['auth', 'login', '--no-wait'])
+              const pair = await runHiremateCli(skillDir, ['auth', 'login', '--no-wait'])
               if (pair?.status === 'authorized') {
                 const guideMd = pair?.pro_activation_guide?.user_reply_menu_markdown
                 const outLines = [pair.message || `设备已绑定（${pair.email}）`]
@@ -213,13 +222,68 @@ export function apply(ctx) {
           description: '一键生成并刷新本地只读静态求职投递看板（dashboard.html）',
           handler: async () => {
             try {
-              const res = await runHiremateCli(cliPath, ['build-dashboard'])
+              const res = await runHiremateCli(skillDir, ['build-dashboard'])
+              const outLines = [
+                `已刷新本地求职投递看板（${res.tier === 'pro' ? 'Pro 专业版视角' : '免费基础版视角'}，共 ${res.jobs_count} 条记录）：`,
+                res.out_path,
+              ]
+              if (res?.update_notice?.update_available) {
+                outLines.push(`🚀 发现新版本 v${res.update_notice.latest_version}，输入 /hiremate-update 可一键自动升级。`)
+              }
               return {
                 kind: 'success',
-                text: `已刷新本地求职投递看板（${res.tier === 'pro' ? 'Pro 专业版视角' : '免费基础版视角'}，共 ${res.jobs_count} 条记录）：\n${res.out_path}`,
+                text: outLines.join('\n'),
               }
             } catch (err) {
               return { kind: 'error', text: `构建看板失败：${err?.message || err}` }
+            }
+          },
+        }))
+
+        disposers.push(cmdCtx.commands.register({
+          name: 'hiremate-update',
+          description: '检查新版本或一键无损自动更新「求职助手」（Gitee 主源 + GitHub 自动备源，保留全部本地求职数据）',
+          input: { hint: '[留空直接升级；输入 check 仅检查新版本，输入 force 强制重装软链]' },
+          handler: async (invocation) => {
+            const rawArg = String(invocation?.args || invocation?.input || '').trim().toLowerCase()
+            try {
+              if (rawArg === 'check') {
+                const chk = await runHiremateCli(skillDir, ['update', '--check'], { timeoutMs: 20_000 })
+                if (!chk?.ok) {
+                  return { kind: 'error', text: chk?.error || '检查更新失败，请稍后重试。' }
+                }
+                if (!chk.update_available) {
+                  return { kind: 'success', text: `✅ 当前已是最新版本 v${chk.current_version}（检查源：${chk.source_used || 'gitee'}）。` }
+                }
+                const hl = (chk.highlights || []).map((h) => `• ${h}`).join('\n')
+                return {
+                  kind: 'success',
+                  text: [
+                    `🚀 发现新版本 v${chk.latest_version}（当前 v${chk.current_version}）`,
+                    ...(hl ? [hl] : []),
+                    '👉 直接输入 /hiremate-update（不带参数）即可一键完成自动升级！',
+                  ].join('\n'),
+                }
+              }
+
+              const cliArgs = rawArg === 'force' ? ['update', '--force'] : ['update']
+              const res = await runHiremateCli(skillDir, cliArgs, { timeoutMs: 60_000 })
+              if (!res?.ok) {
+                return { kind: 'error', text: res?.error || '自动更新未成功，本地版本与求职数据均完整保留。' }
+              }
+              if (res.already_latest) {
+                return { kind: 'success', text: `✅ ${res.message || `当前已是最新版本 v${res.current_version}。`}` }
+              }
+              const hl = (res.highlights || []).map((h) => `• ${h}`).join('\n')
+              return {
+                kind: 'success',
+                text: [
+                  `🎉 ${res.message || `已从 v${res.previous_version} 自动升级至 v${res.current_version}！`}`,
+                  ...(hl ? ['本次更新亮点：', hl] : []),
+                ].join('\n'),
+              }
+            } catch (err) {
+              return { kind: 'error', text: `执行自动更新失败：${err?.message || err}` }
             }
           },
         }))

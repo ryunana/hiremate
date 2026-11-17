@@ -56,6 +56,7 @@ class TestOpenPluginAndE2E(unittest.TestCase):
         self.srv = None
         clean_env = {k: v for k, v in os.environ.items() if not k.startswith(("STRIPE_", "XUNHUPAY_", "EPAY_"))}
         clean_env["HIREMATE_DISABLE_DESKTOP_NOTIFY"] = "1"
+        clean_env["HIREMATE_DISABLE_UPDATE_CHECK"] = "1"
         clean_env["HIREMATE_NO_BROWSER"] = "1"
         clean_env["HIREMATE_HOME"] = str(self.home)
         clean_env.pop("HIREMATE_ENV", None)
@@ -319,7 +320,7 @@ console.log(JSON.stringify({{ skills, commands }}));
         self.assertEqual(parsed_dsh["skills"], ["hiremate"])
         self.assertEqual(
             parsed_dsh["commands"],
-            ["hiremate-status", "hiremate-login", "hiremate-dashboard"],
+            ["hiremate-status", "hiremate-login", "hiremate-dashboard", "hiremate-update"],
         )
 
         # 验证 install_plugin 自动写入了 mock_dsh/cordis.patch.yml 挂载块，且当用户级 skill 已挂载时 index.mjs 不重复注册同名 skill
@@ -335,7 +336,10 @@ console.log(JSON.stringify({{ skills, commands }}));
         self.assertEqual(node_run_dedup.returncode, 0, node_run_dedup.stderr)
         parsed_dedup = json.loads(node_run_dedup.stdout.strip())
         self.assertEqual(parsed_dedup["skills"], [])
-        self.assertEqual(parsed_dedup["commands"], ["hiremate-status", "hiremate-login", "hiremate-dashboard"])
+        self.assertEqual(
+            parsed_dedup["commands"],
+            ["hiremate-status", "hiremate-login", "hiremate-dashboard", "hiremate-update"],
+        )
 
         # 5. 验证无服务端连接时客户端优雅回退免费态（不抛出未捕获异常）
         offline_flags = ["--home", str(self.home), "--workspace", str(self.ws), "--api-base", "http://127.0.0.1:9"]
@@ -1515,6 +1519,281 @@ console.log(JSON.stringify({{ skills, commands }}));
             redir_srv.server_close()
             target_srv.shutdown()
             target_srv.server_close()
+
+    def test_dual_source_update_check_self_update_rollback_and_tarball_fallback(self) -> None:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import hashlib
+        from io import BytesIO
+        import shutil
+        import tarfile
+
+        from hiremate_lib import updater
+
+        # 0. 准备本地用户工作区数据与初始多宿主软链安装，验证升级全程零损用户数据
+        canon_home = self.root / "upd_home"
+        ws_dir = self.root / "upd_ws"
+        mock_wb = self.root / "upd_wb"
+        mock_dsh = self.root / "upd_dsh"
+        mock_wb.mkdir()
+        mock_dsh.mkdir()
+        search_roots = {"workbuddy": mock_wb, "dsh": mock_dsh}
+
+        inst_init = install_plugin.install(
+            target="auto",
+            canonical_home=str(canon_home),
+            search_roots=search_roots,
+        )
+        self.assertTrue(inst_init["ok"])
+
+        flags = ["--home", str(canon_home), "--workspace", str(ws_dir), "--api-base", self.api_base]
+        rc, _ = _run_cli(flags + ["init", "--account-name", "陈默", "--employers", "旧城网络", "--roles", "后端开发"])
+        self.assertEqual(rc, 0)
+        rc, job_res = _run_cli(
+            flags
+            + [
+                "ledger",
+                "upsert-job",
+                "--job-json",
+                json.dumps({"company": "星火云创", "title": "高级Go工程师", "status": "connected"}, ensure_ascii=False),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        saved_job_id = job_res["job"]["job_id"]
+
+        # 1. 启动本地双源 Mock HTTP 服务：模拟 Gitee 主源 502 故障 -> 自动毫秒级切换 GitHub 备源
+        manifest_state: dict[str, object] = {
+            "latest_version": "9.8.0",
+            "min_supported_version": "0.5.0",
+            "published_at": "2026-11-18",
+            "highlights": [
+                "新增双源自动容灾更新 <script>alert(1)</script>",
+                "优化 BOSS 详情面板深筛速度",
+            ],
+            "tarball_bytes": b"",
+            "tarball_sha256": "",
+        }
+        hit_paths: list[str] = []
+
+        class _ReleaseMockHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                hit_paths.append(self.path)
+                if self.path == "/gitee/release.json":
+                    self.send_response(502)
+                    self.end_headers()
+                    self.wfile.write(b"Bad Gateway")
+                    return
+                if self.path == "/github/release.json":
+                    payload = {
+                        "schema_version": 1,
+                        "latest_version": manifest_state["latest_version"],
+                        "min_supported_version": manifest_state["min_supported_version"],
+                        "published_at": manifest_state["published_at"],
+                        "highlights": manifest_state["highlights"],
+                    }
+                    if manifest_state["tarball_sha256"]:
+                        payload["tarball_sha256"] = manifest_state["tarball_sha256"]
+                    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                if self.path == "/github/main.tar.gz":
+                    data = bytes(manifest_state["tarball_bytes"])  # type: ignore[arg-type]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/gzip")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, fmt: str, *args) -> None:
+                pass
+
+        rel_srv = HTTPServer(("127.0.0.1", 0), _ReleaseMockHandler)
+        rel_thread = threading.Thread(target=rel_srv.serve_forever, daemon=True)
+        rel_thread.start()
+        base_http = f"http://127.0.0.1:{rel_srv.server_address[1]}"
+
+        def _prepare_mock_release_tree(dest_dir: Path, ver: str, *, break_cli: bool = False) -> Path:
+            shutil.copytree(
+                OPEN_ROOT,
+                dest_dir,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store", "dist", ".workspace"),
+            )
+            init_py = dest_dir / "hiremate_lib" / "__init__.py"
+            init_py.write_text(f'"""mock release"""\n\n__version__ = "{ver}"\n', encoding="utf-8")
+            pkg_json = dest_dir / "dsh" / "package.json"
+            pkg_obj = json.loads(pkg_json.read_text(encoding="utf-8"))
+            pkg_obj["version"] = ver
+            pkg_json.write_text(json.dumps(pkg_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            rel_json = dest_dir / "release.json"
+            rel_obj = json.loads(rel_json.read_text(encoding="utf-8"))
+            rel_obj["latest_version"] = ver
+            rel_obj["highlights"] = [f"升级至 v{ver} 核心特性"]
+            rel_json.write_text(json.dumps(rel_obj, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            if break_cli:
+                (dest_dir / "hiremate.py").write_text("import sys\nsys.exit(99)\n", encoding="utf-8")
+            return dest_dir
+
+        def _init_git_repo_from_dir(repo_dir: Path) -> None:
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "test"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "chore(release): mock release"], cwd=repo_dir, check=True, capture_output=True)
+
+        try:
+            os.environ["HIREMATE_DISABLE_UPDATE_CHECK"] = "0"
+            os.environ["HIREMATE_RELEASE_MANIFEST_URLS"] = f"{base_http}/gitee/release.json,{base_http}/github/release.json"
+
+            # 验证被动感知：主源 502 后自动切备源拿到 v9.8.0，并在 config show 与 build-dashboard 双通道输出提醒
+            rc_cfg, cfg_out = _run_cli(flags + ["config", "show"])
+            self.assertEqual(rc_cfg, 0)
+            self.assertIn("/gitee/release.json", hit_paths)
+            self.assertIn("/github/release.json", hit_paths)
+            self.assertTrue(cfg_out["update_notice"]["update_available"])
+            self.assertEqual(cfg_out["update_notice"]["latest_version"], "9.8.0")
+            self.assertIn("升级求职助手", cfg_out["update_notice"]["agent_prompt_hint"])
+
+            # 验证 6 小时本地冷却缓存生效：再次调用不再重复发起 HTTP 请求
+            hits_before = len(hit_paths)
+            rc_dash, dash_out = _run_cli(flags + ["build-dashboard"])
+            self.assertEqual(rc_dash, 0)
+            self.assertEqual(len(hit_paths), hits_before)
+            self.assertEqual(dash_out["update_notice"]["latest_version"], "9.8.0")
+            dash_html = Path(dash_out["out_path"]).read_text(encoding="utf-8")
+            self.assertIn('id="release-update-banner"', dash_html)
+            self.assertIn("求职助手 v9.8.0 已发布", dash_html)
+            self.assertIn("请帮我升级求职助手到最新版本", dash_html)
+            # 验证 highlights 中的恶意标签被完整转义，杜绝 XSS
+            self.assertNotIn("<script>alert(1)</script>", dash_html)
+            self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", dash_html)
+
+            # 验证 CLI `update --check` 实时刷新检查
+            rc_chk, chk_out = _run_cli(flags + ["update", "--check"])
+            self.assertEqual(rc_chk, 0)
+            self.assertTrue(chk_out["check_only"])
+            self.assertTrue(chk_out["update_available"])
+            self.assertEqual(chk_out["latest_version"], "9.8.0")
+
+            # 2. 验证损坏更新包安装失败时 100% 自动无损回滚原主副本
+            broken_repo = _prepare_mock_release_tree(self.root / "broken_v980", "9.8.0", break_cli=True)
+            _init_git_repo_from_dir(broken_repo)
+            os.environ["HIREMATE_UPDATE_GIT_URLS"] = f"http://127.0.0.1:9/unreachable.git,{broken_repo.as_uri()}"
+
+            bad_res = updater.perform_self_update(
+                home=canon_home,
+                workspace=ws_dir,
+                search_roots=search_roots,
+            )
+            self.assertFalse(bad_res["ok"])
+            self.assertEqual(bad_res["code"], "UPDATE_INSTALL_FAILED")
+            self.assertTrue(bad_res["rolled_back"])
+            # 确认回滚后原安装目录 hiremate.py 与 dsh-plugin/skills/hiremate 软链依然完好可用
+            ver_after_rb = subprocess.run(
+                [sys.executable, str(canon_home / "skill" / "hiremate" / "hiremate.py"), "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn(updater.__version__, ver_after_rb.stdout)
+            self.assertTrue((canon_home / "dsh-plugin" / "skills" / "hiremate" / "SKILL.md").is_file())
+
+            # 验证源地址安全守卫：拦截参数注入、非可信域名与生产模式下的明文 HTTP / file://
+            for unsafe_url in (
+                "--upload-pack=evil",
+                "http://example.com/release.json",
+                "file:///etc/passwd",
+            ):
+                with self.assertRaises(ValueError):
+                    updater._validate_source_url(unsafe_url, allow_test_local=False)
+            with self.assertRaises(ValueError):
+                updater._validate_source_url(
+                    "https://evil-mirror.example.com/main.tar.gz",
+                    allow_test_local=False,
+                    restrict_trusted_hosts=True,
+                )
+
+            # 3. 验证正常 Git 双源容灾升级（主源不可达 -> 自动切备源 v9.8.0）+ 全宿主软链同步 + 本地账本零丢失
+            good_repo = _prepare_mock_release_tree(self.root / "good_v980", "9.8.0", break_cli=False)
+            _init_git_repo_from_dir(good_repo)
+            os.environ["HIREMATE_UPDATE_GIT_URLS"] = f"http://127.0.0.1:9/dead-gitee.git,{good_repo.as_uri()}"
+
+            ok_res = updater.perform_self_update(
+                home=canon_home,
+                workspace=ws_dir,
+                search_roots=search_roots,
+            )
+            self.assertTrue(ok_res["ok"], ok_res)
+            self.assertTrue(ok_res["updated"])
+            self.assertEqual(ok_res["current_version"], "9.8.0")
+            self.assertTrue(ok_res["dashboard_refreshed"])
+
+            # 主副本及 WorkBuddy / DSH 软链均已同步为 9.8.0
+            for entry_py in (
+                canon_home / "skill" / "hiremate" / "hiremate.py",
+                mock_wb / "skills" / "hiremate" / "hiremate.py",
+                mock_dsh / "skills" / "hiremate" / "hiremate.py",
+            ):
+                ver_proc = subprocess.run([sys.executable, str(entry_py), "--version"], capture_output=True, text=True, check=True)
+                self.assertIn("9.8.0", ver_proc.stdout)
+
+            # 升级后刷新的看板已升至 v9.8.0 且不再残留旧版升级横幅
+            refreshed_html = (ws_dir / "dashboard.html").read_text(encoding="utf-8")
+            self.assertIn("v9.8.0", refreshed_html)
+            self.assertNotIn('id="release-update-banner"', refreshed_html)
+
+            # 验证用户的本地求职账本记录与配置 100% 原样保留
+            rc_ls, ls_out = _run_cli(flags + ["ledger", "list"])
+            self.assertEqual(rc_ls, 0)
+            self.assertEqual(ls_out["count"], 1)
+            self.assertEqual(ls_out["items"][0]["job_id"], saved_job_id)
+            self.assertEqual(ls_out["items"][0]["company"], "星火云创")
+
+            # 4. 验证 Tar-Slip 路径穿越攻击拦截 + 无 Git 环境下的 HTTPS Tarball (含 SHA-256 校验) 兜底升级
+            evil_buf = BytesIO()
+            with tarfile.open(fileobj=evil_buf, mode="w:gz") as tf:
+                info = tarfile.TarInfo(name="../../escaped_evil.txt")
+                payload_b = b"pwned"
+                info.size = len(payload_b)
+                tf.addfile(info, BytesIO(payload_b))
+            with self.assertRaises(RuntimeError):
+                updater._safe_extract_tarball(evil_buf.getvalue(), self.root / "evil_extract")
+
+            tar_src = _prepare_mock_release_tree(self.root / "tar_v990", "9.9.0", break_cli=False)
+            good_tar_buf = BytesIO()
+            with tarfile.open(fileobj=good_tar_buf, mode="w:gz") as tf:
+                tf.add(tar_src, arcname="hiremate-main")
+            tar_bytes = good_tar_buf.getvalue()
+            manifest_state["latest_version"] = "9.9.0"
+            manifest_state["tarball_bytes"] = tar_bytes
+            manifest_state["tarball_sha256"] = hashlib.sha256(tar_bytes).hexdigest()
+
+            os.environ["HIREMATE_FORCE_TARBALL_UPDATE"] = "1"
+            os.environ["HIREMATE_UPDATE_TARBALL_URL"] = f"{base_http}/github/main.tar.gz"
+
+            tar_res = updater.perform_self_update(
+                home=canon_home,
+                workspace=ws_dir,
+                search_roots=search_roots,
+            )
+            self.assertTrue(tar_res["ok"], tar_res)
+            self.assertEqual(tar_res["current_version"], "9.9.0")
+            self.assertEqual(tar_res["source_used"], "tarball:github")
+            ver_tar = subprocess.run(
+                [sys.executable, str(canon_home / "skill" / "hiremate" / "hiremate.py"), "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertIn("9.9.0", ver_tar.stdout)
+        finally:
+            rel_srv.shutdown()
+            rel_srv.server_close()
 
 
 if __name__ == "__main__":

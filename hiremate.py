@@ -37,7 +37,7 @@ OPEN_ROOT = Path(__file__).resolve().parent
 if str(OPEN_ROOT) not in sys.path:
     sys.path.insert(0, str(OPEN_ROOT))
 
-from hiremate_lib import __version__, client, dashboard, ledger, workspace  # noqa: E402
+from hiremate_lib import __version__, client, dashboard, ledger, updater, workspace  # noqa: E402
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -81,7 +81,7 @@ def _resolve_live_tier_and_creds(
     return tier, creds
 
 
-def _maybe_refresh_pro_dashboard(ws: Path, auth_res: dict[str, Any]) -> None:
+def _maybe_refresh_pro_dashboard(ws: Path, home: Path, auth_res: dict[str, Any]) -> None:
     """当 Pro 账户绑定或校验生效且本机已初始化工作区时，自动将 dashboard.html 刷新为 Pro 视图。"""
     if not (auth_res.get("ok") and auth_res.get("active") and workspace.config_path(ws).is_file()):
         return
@@ -95,6 +95,7 @@ def _maybe_refresh_pro_dashboard(ws: Path, auth_res: dict[str, Any]) -> None:
                 "days_left": auth_res.get("days_left"),
                 "expires_at": auth_res.get("expires_at"),
             },
+            update_notice=updater.get_passive_update_notice(home),
         )
         auth_res["dashboard_refreshed"] = True
         auth_res["dashboard_path"] = dash.get("out_path")
@@ -387,6 +388,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="演示看板视角：free（免费基础版）或 pro（Pro 专业版，默认）",
     )
 
+    # 8. update (Gitee 主源 + GitHub 自动备源：版本检查与一键无损自动更新)
+    p_upd = sub.add_parser(
+        "update",
+        help="检查新版本或一键无损自动更新（Gitee 主源 + GitHub 自动备源，完整保留本地简历与账本）",
+    )
+    p_upd.add_argument("--check", action="store_true", help="仅实时检查远端是否有新版本，不修改本地文件")
+    p_upd.add_argument("--force", action="store_true", help="即使当前已是最新版本也强制拉取并同步全宿主软链")
+    p_upd.add_argument(
+        "--source",
+        choices=("auto", "gitee", "github"),
+        default="auto",
+        help="更新源选择（默认 auto：优先走 Gitee 主源，超时或异常时自动切换 GitHub 备源）",
+    )
+
     return parser
 
 
@@ -424,7 +439,7 @@ def main(argv: list[str] | None = None) -> int:
                 force=args.force,
                 reset_profile=args.reset_profile,
             )
-            _emit(res)
+            _emit(updater.attach_passive_update_notice(res, home))
             return 0
 
         if args.cmd == "checklist":
@@ -434,17 +449,17 @@ def main(argv: list[str] | None = None) -> int:
             b_cap = None if args.browser_capable is None else (args.browser_capable == "true")
             b_hp = None if args.builtin_headed_persistent is None else (args.builtin_headed_persistent == "true")
             e_inst = None if args.ego_installed is None else (args.ego_installed == "true")
-            _emit(
-                workspace.build_startup_checklist(
-                    ws,
-                    cfg=cfg,
-                    tier=tier,
-                    authenticated_email=email,
-                    browser_capable=b_cap,
-                    builtin_headed_persistent=b_hp,
-                    ego_installed=e_inst,
-                )
+            chk_payload = workspace.build_startup_checklist(
+                ws,
+                cfg=cfg,
+                tier=tier,
+                authenticated_email=email,
+                browser_capable=b_cap,
+                builtin_headed_persistent=b_hp,
+                ego_installed=e_inst,
             )
+            chk_payload["version"] = __version__
+            _emit(updater.attach_passive_update_notice(chk_payload, home))
             return 0
 
         if args.cmd == "config":
@@ -454,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
                 tier, _creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
                 show_payload: dict[str, Any] = {
                     "ok": True,
+                    "version": __version__,
                     "workspace": str(ws),
                     "tier": tier,
                     "initialized": ob["initialized"],
@@ -479,7 +495,7 @@ def main(argv: list[str] | None = None) -> int:
                         tier=tier,
                         dashboard_path=str((ws / "dashboard.html").resolve()),
                     )
-                _emit(show_payload)
+                _emit(updater.attach_passive_update_notice(show_payload, home))
                 return 0
 
             if args.cfg_cmd == "set":
@@ -674,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
                 _emit({"ok": True, "count": len(items), "items": items})
                 return 0
             if args.led_cmd == "summary":
-                _emit({"ok": True, "summary": led.summary()})
+                _emit(updater.attach_passive_update_notice({"ok": True, "summary": led.summary()}, home))
                 return 0
             if args.led_cmd == "export-csv":
                 res = led.export_csv(Path(args.out).expanduser().resolve())
@@ -695,8 +711,8 @@ def main(argv: list[str] | None = None) -> int:
                     wait_seconds=wait_sec,
                     open_browser=not args.no_browser,
                 )
-                _maybe_refresh_pro_dashboard(ws, login_res)
-                _emit(login_res)
+                _maybe_refresh_pro_dashboard(ws, home, login_res)
+                _emit(updater.attach_passive_update_notice(login_res, home))
                 return 0
             if args.auth_cmd == "upgrade":
                 res = client.auth_open_upgrade(
@@ -726,13 +742,14 @@ def main(argv: list[str] | None = None) -> int:
                     home=home,
                     api_base_override=args.api_base,
                 )
-                _maybe_refresh_pro_dashboard(ws, vc_res)
-                _emit(vc_res)
+                _maybe_refresh_pro_dashboard(ws, home, vc_res)
+                _emit(updater.attach_passive_update_notice(vc_res, home))
                 return 0
             if args.auth_cmd == "status":
                 st_res = client.auth_status(workspace=ws, home=home, api_base_override=args.api_base)
-                _maybe_refresh_pro_dashboard(ws, st_res)
-                _emit(st_res)
+                st_res["version"] = __version__
+                _maybe_refresh_pro_dashboard(ws, home, st_res)
+                _emit(updater.attach_passive_update_notice(st_res, home))
                 return 0
             if args.auth_cmd == "devices":
                 res = client.auth_devices(
@@ -749,14 +766,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "pro":
             if args.pro_cmd == "patrol-gate":
-                _emit(
-                    client.pro_patrol_gate(
-                        workspace=ws,
-                        home=home,
-                        api_base_override=args.api_base,
-                        now_override=args.now,
-                    )
+                gate_res = client.pro_patrol_gate(
+                    workspace=ws,
+                    home=home,
+                    api_base_override=args.api_base,
+                    now_override=args.now,
                 )
+                _emit(updater.attach_passive_update_notice(gate_res, home))
                 return 0
             if args.pro_cmd == "evaluate-job":
                 job_data = _load_json_arg(args.job_json)
@@ -810,7 +826,9 @@ def main(argv: list[str] | None = None) -> int:
             out = Path(args.out).expanduser().resolve() if args.out else None
             tier = args.demo_tier if args.demo else "free"
             pro_meta: dict[str, Any] = {}
+            passive_notice: dict[str, Any] | None = None
             if not args.demo:
+                passive_notice = updater.get_passive_update_notice(home)
                 tier_live, creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
                 if tier_live == "pro" and creds:
                     tier = "pro"
@@ -827,6 +845,7 @@ def main(argv: list[str] | None = None) -> int:
                 tier=tier,
                 demo_tier=args.demo_tier,
                 pro_meta=pro_meta,
+                update_notice=passive_notice,
             )
             if not args.demo and res.get("jobs_count", 0) == 0:
                 cfg_now = workspace.load_config(ws)
@@ -836,8 +855,21 @@ def main(argv: list[str] | None = None) -> int:
                     tier=tier,
                     dashboard_path=str(res.get("out_path") or ""),
                 )
+            if passive_notice:
+                res["update_notice"] = passive_notice
             _emit(res)
             return 0
+
+        if args.cmd == "update":
+            upd_res = updater.perform_self_update(
+                home=home,
+                workspace=ws,
+                check_only=bool(args.check),
+                force=bool(args.force),
+                prefer_source=args.source,
+            )
+            _emit(upd_res)
+            return 0 if upd_res.get("ok") else 1
 
     except workspace.ConfigCorruptError as exc:
         _emit(

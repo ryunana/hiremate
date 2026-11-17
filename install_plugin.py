@@ -28,6 +28,10 @@ RUNTIME_FILES = (
     "templates",
 )
 
+OPTIONAL_RUNTIME_FILES = (
+    "release.json",
+)
+
 DSH_BUNDLE_FILES = (
     "index.mjs",
     "package.json",
@@ -124,12 +128,29 @@ def _copy_runtime_into(dest_dir: Path, skill_src: Path) -> list[str]:
                 dst.unlink()
             shutil.copy2(src, dst)
         installed.append(str(dst))
+
+    for opt_name in OPTIONAL_RUNTIME_FILES:
+        opt_src = OPEN_ROOT / opt_name
+        if opt_src.is_file():
+            opt_dst = dest_dir / opt_name
+            if opt_dst.is_symlink():
+                opt_dst.unlink()
+            shutil.copy2(opt_src, opt_dst)
+            installed.append(str(opt_dst))
     return installed
 
 
 def _link_skill_dir(source_dir: Path, target_link: Path) -> str:
-    """建立目录软链（Windows 无管理员权限时自动回退 Junction 或目录拷贝）。"""
+    """建立目录软链（若已指向同一主副本则幂等保留，防 Windows CWD 句柄占用报错；无权限时回退 Junction 或拷贝）。"""
     target_link.parent.mkdir(parents=True, exist_ok=True)
+    is_sym = target_link.is_symlink()
+    is_junc = (not is_sym) and _is_windows_reparse_point(target_link)
+    if (is_sym or is_junc) and target_link.exists():
+        try:
+            if target_link.resolve() == source_dir.resolve():
+                return "symlink" if is_sym else "junction"
+        except OSError:
+            pass
     _remove_link_or_dir(target_link)
 
     try:
@@ -205,7 +226,10 @@ def _merge_dsh_cordis_patch(patch_file: Path, index_mjs_path: Path) -> str:
         merged = existing[:b_idx].rstrip() + "\n\n" + block
         if after:
             merged += "\n" + after
-        patch_file.write_text(merged.lstrip("\n"), encoding="utf-8")
+        final_text = merged.lstrip("\n")
+        if final_text == existing:
+            return "unchanged"
+        patch_file.write_text(final_text, encoding="utf-8")
         return "updated"
 
     if "- id: hiremate-dsh" in existing:
@@ -484,10 +508,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true", help="仅预览将要写入和软链的路径，不修改磁盘")
     parser.add_argument("--uninstall", action="store_true", help="卸载全部宿主软链与插件运行文件（默认保留本地求职数据）")
     parser.add_argument("--purge-data", action="store_true", help="配合 --uninstall 一并删除 ~/.hiremate 下的求职账本与凭证")
+    parser.add_argument("--search-roots-json", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
+    parsed_roots: dict[str, str | Path] | None = None
+    if args.search_roots_json:
+        raw_roots = json.loads(args.search_roots_json)
+        if not isinstance(raw_roots, dict):
+            raise ValueError("--search-roots-json 必须为对象字典")
+        parsed_roots = {str(k): str(v) for k, v in raw_roots.items()}
+
     if args.uninstall:
-        result = uninstall(canonical_home=args.canonical_home, purge_data=args.purge_data)
+        result = uninstall(
+            canonical_home=args.canonical_home,
+            search_roots=parsed_roots,
+            purge_data=args.purge_data,
+        )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
 
@@ -495,6 +531,7 @@ def main(argv: list[str] | None = None) -> int:
         target=args.target,
         dest_root=args.dest_root,
         canonical_home=args.canonical_home,
+        search_roots=parsed_roots,
         dry_run=args.dry_run,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))

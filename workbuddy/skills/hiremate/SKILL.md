@@ -23,7 +23,11 @@ description: 求职助手（hiremate）：BOSS 直聘深筛排雷、四态投递
 python3 "<SKILL_DIR>/hiremate.py" <子命令>
 ```
 
-（若当前宿主为 `DeepSeek Harness (dsh)`，用户还可使用零 Token 斜杠命令 `/hiremate-status`、`/hiremate-login [pro]`、`/hiremate-dashboard`。）
+（若当前宿主为 `DeepSeek Harness (dsh)`，用户还可使用零 Token 斜杠命令 `/hiremate-status`、`/hiremate-login [pro]`、`/hiremate-dashboard`、`/hiremate-update`。）
+
+> **版本更新自动感知与一键升级规约**：
+> - 当任何 `hiremate.py` 子命令返回 JSON 中带有 `"update_notice"`（`update_available: true`）时：若 `required: true`（低于最低兼容版本），先提醒用户升级再继续；若为常规更新，正常完成当前任务后**在回复末尾用 1～2 行告知最新版本号与更新亮点**，提示用户直接回复**「升级求职助手」**（DSH 也可输 `/hiremate-update`）即可一键无损自动升级（未经用户确认不要静默覆盖本地代码）。
+> - 当用户说「升级求职助手 / 检查更新 / 更新插件」时，运行 `python3 "<SKILL_DIR>/hiremate.py" update`（仅查询是否有更新传 `--check`），从 Gitee 主源（失败自动切 GitHub 备源）自动升级全宿主软链并完整保留本地求职数据；升级完成后重新读取最新 `SKILL.md` 并汇报新功能亮点。
 
 ### 零号守卫：首次会话必检「自带 Browser Use 有头+持久化」并跑 `checklist`
 无论新用户第一句话说的是「初始化求职助手」「帮我在 BOSS 找岗位」「帮我登录求职助手」还是「开启自动巡检」，首次接手时**先判断当前宿主自带的 `Browser Use` 是否同时支持「有头可见窗口（Headed）」与「登录态持久化（Persistent Profile）」**，并立即运行：
@@ -171,11 +175,12 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - **场景 B（沟通顺畅主动递交简历）**：点击工具栏「发简历」勾选 `recommended_resume` 发出请求并配简短礼貌附言，此时对方尚未点同意，**只许记为 `resume_requested`**！待后续巡检看到聊天框出现「对方已接收/同意你的附件简历」系统提示后，再执行 `ledger transition --job-id <id> --status resume_delivered --resume-used "<文件名>"`。
 5. **收尾解锁**：若本轮顺带执行了到期的主动找岗（`discover_due: true`），完成后运行 `pro mark-discovered`；最后务必运行 `pro mark-idle`。
 
-### 6. 刷新本地转化漏斗看板与导出原生 Excel 台账
-随时可运行以下命令为用户生成本地高密度静态复盘看板，或导出原生 `.xlsx` / `.csv` 表格：
+### 6. 刷新本地转化漏斗看板、导出原生 Excel 台账与一键自动更新
+随时可运行以下命令为用户生成本地高密度静态复盘看板、导出原生 `.xlsx` / `.csv` 表格，或一键从 Gitee 主源（GitHub 自动备源）无损升级至最新版本：
 
 ```bash
 python3 "<SKILL_DIR>/hiremate.py" build-dashboard
 python3 "<SKILL_DIR>/hiremate.py" ledger export-excel --out "<导出路径.xlsx>"
 python3 "<SKILL_DIR>/hiremate.py" ledger export-csv --out "<导出路径.csv>"
+python3 "<SKILL_DIR>/hiremate.py" update
 ```

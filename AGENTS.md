@@ -25,7 +25,8 @@ fi
 ```
 
 - 安装器会将唯一主副本写入 `~/.hiremate/skill/hiremate`，并建立目录软链同步至本机已安装的 `WorkBuddy`、`dsh`、`Claude Code`、`Codex`；
-- **当前会话无需等待用户重启客户端**：直接调用 `python3 ~/.hiremate/skill/hiremate/hiremate.py` 即可立即执行后续步骤（仅 `dsh` 的 `/hiremate-status`、`/hiremate-login`、`/hiremate-dashboard` 三个快捷斜杠命令菜单在下次重载后显示，顺带提一句即可，不要停下等重启）；
+- **当前会话无需等待用户重启客户端**：直接调用 `python3 ~/.hiremate/skill/hiremate/hiremate.py` 即可立即执行后续步骤（仅 `dsh` 的 `/hiremate-status`、`/hiremate-login`、`/hiremate-dashboard`、`/hiremate-update` 四个快捷斜杠命令菜单在下次重载后显示，顺带提一句即可，不要停下等重启）；
+- **后续自动感知与一键升级**：日常命令每 6 小时静默向公开仓（Gitee 主源 + GitHub 备源）检查一次新版本，返回 `update_notice` 时在回复末尾提醒用户说「升级求职助手」（运行 `hiremate.py update` 或 `/hiremate-update`）即可全宿主无损自动升级；
 - 安装完成后，请立即读取 `~/.hiremate/skill/hiremate/SKILL.md` 按标准规约执行。
 
 ## 第二步：先查本地状态 + 浏览器通道能力体检，生成《四项启动准备核对单》

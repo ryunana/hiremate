@@ -64,7 +64,7 @@ cd hiremate-open
 python3 install_plugin.py
 ```
 
-重启宿主客户端后，直接对助手说（或在 DSH 中输入 `/hiremate-status`、`/hiremate-login`、`/hiremate-dashboard`）：
+重启宿主客户端后，直接对助手说（或在 DSH 中输入 `/hiremate-status`、`/hiremate-login`、`/hiremate-dashboard`、`/hiremate-update`）：
 
 - **「帮我初始化求职助手，这是我的简历：`<简历路径>`」**
 - **「帮我在 BOSS 搜索一轮匹配的岗位预览」**
@@ -72,6 +72,7 @@ python3 install_plugin.py
 - **「把主动找岗设为半自动，消息回复设为全自动」**（Pro 专属能力）
 - **「我不排斥外包和 OD 机会，但不接受驻场，帮我更新筛选偏好」**（外包/派遣与驻场均可独立设为排除、仅接被动来信或完全开放）
 - **「刷新并打开我的求职看板」**
+- **「升级求职助手」**（新版本发布后会在对话与看板顶部自动提醒；支持 Gitee 主源 + GitHub 自动备源一键无损更新，完整保留本地求职数据）
 
 ---
 
