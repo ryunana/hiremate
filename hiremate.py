@@ -351,10 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
     auth_sub.add_parser("logout", help="清除本机登录凭证")
 
     # 6. pro (连接云端 Pro 闭源策略接口)
-    p_pro = sub.add_parser("pro", help="调用 Pro 专业版云端错峰门控、深度排雷与话术守卫")
+    p_pro = sub.add_parser("pro", help="调用 Pro 专业版云端作息门控、深度精准匹配与话术守卫")
     pro_sub = p_pro.add_subparsers(dest="pro_cmd", required=True)
 
-    p_gate = pro_sub.add_parser("patrol-gate", help="请求云端错峰作息门控与本轮 Pro 执行规约")
+    p_gate = pro_sub.add_parser("patrol-gate", help="请求云端工作时间门控与本轮 Pro 执行规约")
     p_gate.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
 
     p_eval = pro_sub.add_parser("evaluate-job", help="调用云端外包/猎头非对称评估与多版简历路由")

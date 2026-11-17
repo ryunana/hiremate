@@ -126,12 +126,12 @@ def build_demo_dataset(demo_tier: str = "pro") -> tuple[dict[str, Any], list[dic
         "exclude_keywords": ["驻场", "外派", "电销", "纯硬件量产"],
         "resume_routes": [
             {
-                "name": "林远-AI应用产品简历.pdf",
+                "name": "林远-AI产品经理B端.pdf",
                 "keywords": ["AI", "大模型", "Agent", "RAG", "智能体", "知识库"],
                 "is_default": True,
             },
             {
-                "name": "林远-企业级SaaS产品简历.pdf",
+                "name": "林远-SaaS产品经理B端.pdf",
                 "keywords": ["SaaS", "B端", "工作流", "ERP", "协同", "权限"],
                 "is_default": False,
             },
@@ -148,7 +148,7 @@ def build_demo_dataset(demo_tier: str = "pro") -> tuple[dict[str, Any], list[dic
 
     demo_profile_md = (
         "【虚构示例档案：林远】5 年企业级 SaaS 与 AI 应用产品经验。"
-        "主导过千万级文档企业知识库 RAG 检索重构（首屏答案采纳率由 41% 提至 73%）与多租户审批流引擎；"
+        "从 0 到 1 主导企业 AI 员工助手与千万级文档知识库问答落地（知识问答准确率达 89%，高频问题自助解决率超 70%）及多租户审批流引擎；"
         "明确无硬件嵌入式及 C 端游戏买量经验；前东家「示例科技」「远山数字」已自动同步至屏蔽黑名单。"
     )
 
@@ -195,7 +195,7 @@ def build_demo_dataset(demo_tier: str = "pro") -> tuple[dict[str, Any], list[dic
                 "risk_tags": ["面板标薪偏低容忍"],
                 "match_reasons": "企业内部搜索与企业文档切片召回调优经验完全对口",
                 "gaps": "面板标薪上限略低，先正常沟通业务匹配度，进入约面/谈薪阶段再由本人确认总包空间",
-                "icebreaker": "您好，看到咱们在招大模型知识库产品，我之前主导过千万级企业文档切片召回与采纳率调优（41%→73%），方向挺对口的，方便沟通了解下吗？",
+                "icebreaker": "您好，看到咱们在招大模型知识库产品，我之前主导过千万级企业文档切片召回与重排调优（知识问答准确率稳定在 89%），方向挺对口的，方便沟通了解下吗？",
                 "status": "discovered",
                 "status_label": STATUS_LABELS["discovered"],
                 "resume_used": "",
@@ -303,7 +303,7 @@ def build_demo_dataset(demo_tier: str = "pro") -> tuple[dict[str, Any], list[dic
             "icebreaker": "",
             "status": "handed_off",
             "status_label": STATUS_LABELS["handed_off"],
-            "resume_used": "林远-AI应用产品简历.pdf",
+            "resume_used": "林远-AI产品经理B端.pdf",
             "job_url": "https://www.zhipin.com/job_detail/demo_01.html",
             "note": "对方已查阅 PDF 简历，询问周四 14:00 或周五 10:30 腾讯会议业务一面时间，已暂停自动回复交回本人敲定",
             "opening_sent_at": "2026-11-14T10:12:00+08:00",
@@ -332,7 +332,7 @@ def build_demo_dataset(demo_tier: str = "pro") -> tuple[dict[str, Any], list[dic
             "status_label": STATUS_LABELS["discovered"],
             "resume_used": "",
             "job_url": "https://www.zhipin.com/job_detail/demo_02.html",
-            "note": "半自动深筛通过，等待确认发送破冰语（推荐路由：林远-AI应用产品简历.pdf）",
+            "note": "半自动深筛通过，等待确认发送破冰语（推荐路由：林远-AI产品经理B端.pdf）",
             "opening_sent_at": None,
             "connected_at": None,
             "resume_requested_at": None,
@@ -357,7 +357,7 @@ def build_demo_dataset(demo_tier: str = "pro") -> tuple[dict[str, Any], list[dic
             "icebreaker": "",
             "status": "resume_delivered",
             "status_label": STATUS_LABELS["resume_delivered"],
-            "resume_used": "林远-AI应用产品简历.pdf",
+            "resume_used": "林远-AI产品经理B端.pdf",
             "job_url": "https://www.zhipin.com/job_detail/demo_03.html",
             "note": "已简短答复离线准确率提升指标，对方点击同意并已接收 AI 方向 PDF 简历",
             "opening_sent_at": "2026-11-14T14:20:00+08:00",
@@ -384,7 +384,7 @@ def build_demo_dataset(demo_tier: str = "pro") -> tuple[dict[str, Any], list[dic
             "icebreaker": "",
             "status": "resume_requested",
             "status_label": STATUS_LABELS["resume_requested"],
-            "resume_used": "林远-企业级SaaS产品简历.pdf",
+            "resume_used": "林远-SaaS产品经理B端.pdf",
             "job_url": "https://www.zhipin.com/job_detail/demo_04.html",
             "note": "双方已建联，按 B端方向路由发起附件简历发送请求，等待 HRBP 点击同意（未计入已送达）",
             "opening_sent_at": "2026-11-15T09:30:00+08:00",
@@ -710,7 +710,7 @@ def render_dashboard_html(
         </div>
         <div class="upgrade-features">
           <strong>特惠 ¥69（原价 ¥99）一次买断解锁全链路托管：</strong>
-          <span>① 找岗全自动破冰 + 工作日错峰巡检</span>
+          <span>① 工作时间主动匹配破冰 + 自动巡检</span>
           <span>② HR 未读消息真人感答疑（约面 / 谈薪 / 微信自动停手交回本人）</span>
           <span>③ 100+ 深度外包词库 + 多版 PDF 简历路由</span>
           <span>④ <strong>一次买断长期有效，支持 2 台个人电脑同时绑定</strong></span>
@@ -782,7 +782,7 @@ def render_dashboard_html(
         handed_off_html = (
             '<div class="empty-box empty-locked">'
             '<strong>Pro 专属托管队列（当前未开启自动消息巡检与答疑）</strong><br/>'
-            '激活 Pro 后，求职助手会在工作日错峰自动答复 HR 常规背景追问并投递对应 PDF 简历；'
+            '激活 Pro 后，求职助手会在工作时间自动答复 HR 常规背景追问并投递对应 PDF 简历；'
             '一旦遇到「约面试时间 / 要微信电话 / 压薪谈底线」，将自动暂停回复并置顶在此处提醒你本人接管。<br/>'
             f'<a class="inline-pro-link" href="{pro_checkout_url}" target="_blank" rel="noopener noreferrer">'
             '⚡ 前往开通 Pro 全托管（特惠 ¥69 · 原价 ¥99 · 一次买断无月费） →</a>'
@@ -809,7 +809,7 @@ def render_dashboard_html(
         ("resume_requested", "待同意请求", by_status.get("resume_requested", 0)),
         ("connected", "双方已建联", by_status.get("connected", 0)),
         ("opening_sent", "开场已送达", by_status.get("opening_sent", 0)),
-        ("screened_skip", "排雷跳过", by_status.get("screened_skip", 0)),
+        ("screened_skip", "不匹配跳过", by_status.get("screened_skip", 0)),
         ("closed_rejected", "不合适归档", by_status.get("closed_rejected", 0)),
     ]
     filter_pills_html = "\n            ".join(
@@ -2027,12 +2027,12 @@ def render_dashboard_html(
 
     <section class="kpi-grid" aria-label="求职转化核心漏斗">
       <div class="kpi-card">
-        <span class="kpi-label">已深筛总计</span>
+        <span class="kpi-label">已评估岗位</span>
         <div class="kpi-value">{int(funnel.get("screened_total", 0))}</div>
-        <span class="kpi-sub">入库岗位记录总数</span>
+        <span class="kpi-sub">逐岗比对入库总数</span>
       </div>
       <div class="kpi-card">
-        <span class="kpi-label">排雷跳过</span>
+        <span class="kpi-label">不匹配跳过</span>
         <div class="kpi-value">{int(funnel.get("screened_skip", 0))}</div>
         <span class="kpi-sub">{_esc(_skip_kpi_sub(config))}</span>
       </div>
@@ -2123,15 +2123,15 @@ def render_dashboard_html(
               <div class="kv-item"><span class="kv-key">简历底座形态</span><span class="kv-val">{"暂无简历（请先准备本地简历或填写平台在线简历）" if str(config.get("resume_source", "")) == "none" else ("待导入简历（请拖入 PDF 或授权读取平台在线简历）" if str(config.get("resume_source", "")) == "pending" else ("仅平台在线简历（建议在 BOSS 在线简历页生成附件 PDF）" if (str(config.get("resume_source", "")) == "online_only" or not bool(config.get("has_attachment_resume", True))) else "平台在线 + PDF 附件简历齐全"))}</span></div>
               <div class="kv-item"><span class="kv-key">主动找岗模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_discover", "semi")))) if is_pro else "半自动确认（全自动破冰需 Pro）"}</span></div>
               <div class="kv-item"><span class="kv-key">消息答疑模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_reply", "semi")))) if is_pro else "未启用（Pro 解锁半自动/全自动答疑）"}</span></div>
-              <div class="kv-item"><span class="kv-key">错峰巡检时间窗</span><span class="kv-val">{(_esc("仅工作日 " if sched.get("weekdays_only", True) else "每日 ") + _esc(windows_text)) if is_pro else "未启用（Pro 解锁工作日错峰巡检）"}</span></div>
+              <div class="kv-item"><span class="kv-key">自动巡检时间窗</span><span class="kv-val">{(_esc("仅工作日 " if sched.get("weekdays_only", True) else "每日 ") + _esc(windows_text)) if is_pro else "未启用（Pro 解锁工作时间自动巡检）"}</span></div>
               <div class="kv-item"><span class="kv-key">轮次最小间隔</span><span class="kv-val">{f"{int(sched.get('min_interval_minutes', 90))} 分钟" if is_pro else "手动触发单轮"}</span></div>
               <div class="kv-item"><span class="kv-key">单轮 / 单日沟通上限</span><span class="kv-val">每轮 {int(sched.get("max_per_round", 5))} 岗 / 每日 {int(sched.get("max_per_day", 20))} 岗</span></div>
-              <div class="kv-item"><span class="kv-key">Pro 权益模式</span><span class="kv-val">{"买断版生效中：长期有效，持续享受常规功能更新与排雷词库升级" if is_pro else f"<a class='inline-pro-link' style='margin-top:0;' href='{pro_checkout_url}' target='_blank' rel='noopener noreferrer'>特惠 ¥69（原价 ¥99）一次买断解锁全自动托管与排雷词库更新 →</a>"}</span></div>
+              <div class="kv-item"><span class="kv-key">Pro 权益模式</span><span class="kv-val">{"买断版生效中：长期有效，持续享受常规功能更新与精准匹配词库升级" if is_pro else f"<a class='inline-pro-link' style='margin-top:0;' href='{pro_checkout_url}' target='_blank' rel='noopener noreferrer'>特惠 ¥69（原价 ¥99）一次买断解锁全自动托管与精准匹配词库更新 →</a>"}</span></div>
             </div>
           </div>
 
           <div class="strategy-card">
-            <h3>排雷与渠道筛选策略</h3>
+            <h3>精准匹配与渠道过滤策略</h3>
             <div class="kv-list">
               <div class="kv-item"><span class="kv-key">期望最低月薪</span><span class="kv-val">{int(config.get("min_salary_k", 0))}K{("（容忍面板标薪略低）" if config.get("salary_panel_tolerance", True) else "（严格卡线）")}</span></div>
               <div class="kv-item"><span class="kv-key">外包 / 派遣 / OD 策略</span><span class="kv-val">{_esc(_outsourcing_cn(config, is_pro=is_pro))}</span></div>

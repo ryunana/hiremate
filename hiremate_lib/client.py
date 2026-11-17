@@ -40,7 +40,7 @@ from .workspace import (
 
 HTTP_TIMEOUT_SECONDS = 10.0
 
-PRO_UPDATES_NOTE = "一次买断绑定个人账户长期有效，持续享受常规功能更新与云端排雷词库升级"
+PRO_UPDATES_NOTE = "一次买断绑定个人账户长期有效，持续享受常规功能更新与精准匹配词库升级"
 
 FREE_DOWNGRADE_MESSAGE = (
     "当前运行于「求职助手」开源基础版（未绑定设备或 Pro 权益未激活）。"
@@ -933,7 +933,7 @@ def _graceful_pro_fallback(action: str, status: int, data: dict[str, Any]) -> di
         "free_capabilities": [
             "对话式求职事实建档与前东家同字号自动屏蔽",
             "本地 SQLite 四态求职账本与三维查重",
-            "单轮基础外包排雷与初筛预览",
+            "单轮岗位精准匹配与外包过滤预览",
             "本地高密度只读静态投递看板与 Excel(.xlsx)/CSV 导出",
         ],
     }

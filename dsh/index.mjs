@@ -86,7 +86,7 @@ export function apply(ctx) {
     const content = stripFrontmatter(readFileSync(new URL('SKILL.md', base), 'utf-8'))
     ctx.effect(() => ctx.skills.register({
       name: 'hiremate',
-      description: '求职助手（hiremate）：BOSS 直聘深筛排雷、四态投递账本、半自动/全自动消息答疑、多版简历路由与本地静态看板。',
+      description: '求职助手（hiremate）：BOSS 直聘岗位精准匹配（拒绝海投乱投）、一岗一议半自动/全自动消息答疑、多版简历路由、四态投递账本与本地静态看板。',
       whenToUse: '当用户要初始化求职助手、筛选招聘岗位、跟进回复 HR 消息、查看求职看板或登录激活求职助手 Pro 时使用。',
       source: 'runtime',
       content,
@@ -125,7 +125,7 @@ export function apply(ctx) {
                 ? '买断长期有效'
                 : (auth?.days_left ? `剩余 ${auth.days_left} 天` : '生效中')
               const tierLine = auth?.active
-                ? `Pro 专业版生效中 · 账号 ${auth.email} · ${validityText}\n服务说明：${auth.updates_policy || '一次买断长期有效，持续享受常规功能更新与排雷词库升级'}`
+                ? `Pro 专业版生效中 · 账号 ${auth.email} · ${validityText}\n服务说明：${auth.updates_policy || '一次买断长期有效，持续享受常规功能更新与精准匹配词库升级'}`
                 : '当前版本：免费基础版（免登录即可建档筛岗；输入 /hiremate-login 绑定账户，输入 /hiremate-login pro 打开 ¥69 买断开通页）'
               const onboardLine = cfgResp?.onboarding_completed
                 ? null
@@ -148,7 +148,7 @@ export function apply(ctx) {
                 ? '💡 Pro 全自动提醒：当前主动找岗/消息答疑仍为「半自动确认」，直接对助手说「开启 Pro 全自动模式并挂上工作日巡检」即可一键升级全托管！'
                 : null
               const funnelLine = [
-                `累计深筛 ${f.screened_total ?? 0} 岗（排雷跳过 ${f.screened_skip ?? 0}）`,
+                `累计评估 ${f.screened_total ?? 0} 岗（不匹配跳过 ${f.screened_skip ?? 0}）`,
                 `开场已送达 ${f.opening_delivered_total ?? 0}`,
                 `双方已建联 ${f.connected_total ?? 0}`,
                 `PDF简历已送达 ${f.pdf_delivered_total ?? 0}`,

@@ -37,7 +37,7 @@ VALID_STATUSES: tuple[str, ...] = (
 
 STATUS_LABELS: dict[str, str] = {
     "discovered": "待确认候选",
-    "screened_skip": "排雷跳过",
+    "screened_skip": "不匹配跳过",
     "opening_sent": "开场已送达",
     "connected": "双方已建联",
     "resume_requested": "待同意简历请求",
