@@ -95,6 +95,10 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    python3 "<SKILL_DIR>/hiremate.py" auth status
    ```
    - 自动弹出官网「账户中心」并显示配对码（如 `HM-7K9W`）；用户点击「确认授权此设备」后自动落盘本地 `0600` 凭证，且 CLI 会**自动把本地 `dashboard.html` 升级刷新为 Pro 视图**。
+   - **【沙盒弹窗兜底与防「无链接问题框」死红线】**：
+     1. **严禁传 `--no-browser`**：在 `Codex` 等默认开启进程沙盒的宿主中，优先以宿主机非沙盒权限运行 `auth login`，以便系统直接弹出默认浏览器确认页；
+     2. **`browser_opened: false` 必主动补弹可见窗口**：一旦 `auth login`（或 `auth upgrade`）返回 `status: "authorization_pending"` 且 `browser_opened: false`，说明宿主沙盒拦截了系统 `open`，**用户屏幕上根本没弹出确认页**！你必须**立即主动调用当前可见有头浏览器（`ego lite` 或宿主有头浏览器）打开返回的 `verification_uri_complete`**（或申请宿主机权限执行 `open "<verification_uri_complete>"`），确保授权确认页真实弹到用户眼前；
+     3. **严禁调用 `request_user_input` / `ask_question` 等阻塞式「问题框」等待网页登录或授权确认**：此类提问框会在最终 Markdown 回复渲染前挂起回合，导致正文里的「设备授权页」超链接被遮挡，用户只看到一个没链接的问题框而找不到授权页！需要用户去网页点「确认授权此设备」或重新登录 BOSS 时，**直接在普通回复正文中清晰附上完整可点击 URL `verification_uri_complete` 与配对码 `user_code`**，自然结束当前回合等待用户回复即可。
 2. **【硬性闭环】Pro 购买/绑定成功后必讲 5 大权益 + 主动提醒切换「全自动模式（`auto`）」（严禁登完冷场！）**：
    - 当 `auth login` 或 `auth status` 返回 JSON 中包含 `pro_activation_guide`（首次授权绑定、或刚从免费版升级激活 Pro）时，**绝对禁止只回复一句“绑定成功，Pro 已生效”就结束**！必须直接展示 `pro_activation_guide` 的核心内容（若老用户日常会话 `auth status` 未返回该字段，则无需重复弹出菜单）：
      1. **向用户清晰报喜已解锁的 5 项 Pro 专属高级能力**：① 100+ 深度外包名录 + 社区动态排雷池；② 主动找岗与消息答疑「全自动模式（`auto`）」解锁；③ 真人感短句答疑守卫；④ 多版线上 PDF 简历按岗自动路由；⑤ 工作日白天错峰自动巡检 + 约面/谈薪/加微信桌面弹窗停手保护（支持 2 台电脑通用）。

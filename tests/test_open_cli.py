@@ -1795,6 +1795,145 @@ console.log(JSON.stringify({{ skills, commands }}));
             rel_srv.shutdown()
             rel_srv.server_close()
 
+    def test_device_login_sandbox_open_failure_and_resume_reopen_browser(self) -> None:
+        """回归验证：
+        1. macOS 沙盒（如 Codex Seatbelt）下 `open` 返回非 0 退出码时，`open_browser_url` 必须如实返回 False（严禁 Popen 假阳性）；
+        2. 首次 `auth login` 弹窗失败时绝不死等 45 秒，立即（<1.5s）返回 `browser_opened: False` 与 `agent_action_required`（防无链接问题框）；
+        3. 二次 `auth login`（`resumed=True`）若首次 poll 发现仍为 `authorization_pending`，必须自动补弹确认页；
+        4. 二次 `auth login`（`resumed=True`）若用户已在网页点过确认授权，0 延迟直接返回 `authorized`，绝不重复弹出多余浏览器标签页。
+        """
+        from datetime import datetime, timedelta, timezone
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import time
+        from unittest import mock
+        from hiremate_lib import client
+
+        # 1. 验证 darwin 下 open 退出码非 0 时 open_browser_url 返回 False，退出码 0 时返回 True
+        prev_no_b = os.environ.pop("HIREMATE_NO_BROWSER", None)
+        try:
+            with mock.patch.object(client.sys, "platform", "darwin"):
+                with mock.patch.object(
+                    client.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(["open", "https://example.com"], 1),
+                ) as m_fail:
+                    self.assertFalse(client.open_browser_url("https://example.com/activate?code=HM-XGFX"))
+                    m_fail.assert_called_once()
+                with mock.patch.object(
+                    client.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess(["open", "https://example.com"], 0),
+                ) as m_ok:
+                    self.assertTrue(client.open_browser_url("https://example.com/activate?code=HM-XGFX"))
+                    m_ok.assert_called_once()
+        finally:
+            if prev_no_b is not None:
+                os.environ["HIREMATE_NO_BROWSER"] = prev_no_b
+
+        # 搭建轻量本地配对模拟服务（不依赖闭源 pro-server，确保开源独立包亦可完整回归）
+        pair_state = {"approved": False}
+        exp_iso = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+
+        class _MockDeviceHandler(BaseHTTPRequestHandler):
+            def log_message(self, fmt: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:  # noqa: N802
+                length = int(self.headers.get("Content-Length", "0") or "0")
+                if length:
+                    self.rfile.read(length)
+                base_u = f"http://127.0.0.1:{self.server.server_address[1]}"
+                if self.path == "/v1/auth/device/start":
+                    payload = {
+                        "ok": True,
+                        "device_code": "dcode_sandbox_test",
+                        "user_code": "HM-XGFX",
+                        "verification_uri": f"{base_u}/activate",
+                        "verification_uri_complete": f"{base_u}/activate?code=HM-XGFX",
+                        "expires_at": exp_iso,
+                        "interval": 1,
+                    }
+                    raw = json.dumps(payload).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                if self.path == "/v1/auth/device/poll":
+                    if pair_state["approved"]:
+                        payload = {
+                            "ok": True,
+                            "status": "authorized",
+                            "email": "second_device@example.com",
+                            "token": "tok_second_device_ok",
+                            "tier": "pro",
+                            "plan": "pro_buyout",
+                            "active": True,
+                            "lifetime": True,
+                        }
+                        code = 200
+                    else:
+                        payload = {"ok": False, "code": "AUTHORIZATION_PENDING", "message": "等待浏览器确认"}
+                        code = 428
+                    raw = json.dumps(payload).encode("utf-8")
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+        mock_srv = ThreadingHTTPServer(("127.0.0.1", 0), _MockDeviceHandler)
+        mock_thread = threading.Thread(target=mock_srv.serve_forever, daemon=True)
+        mock_thread.start()
+        mock_base = f"http://127.0.0.1:{mock_srv.server_address[1]}"
+        h_dir = self.root / "sandbox_home"
+        w_dir = self.root / "sandbox_ws"
+        flags = ["--home", str(h_dir), "--workspace", str(w_dir), "--api-base", mock_base]
+        try:
+            # 2. 首次运行 auth login（默认 wait_seconds=45），模拟沙盒拦截导致 open_browser_url 返回 False：
+            #    必须秒级返回（严禁阻塞 45 秒），且返回 agent_action_required 严禁弹无链接问题框
+            with mock.patch.object(client, "open_browser_url", return_value=False) as m_open1:
+                t0 = time.monotonic()
+                rc1, res1 = _run_cli(flags + ["auth", "login", "--wait-seconds", "45"])
+                elapsed1 = time.monotonic() - t0
+                self.assertEqual(rc1, 0)
+                self.assertLess(elapsed1, 2.0, "浏览器未成功弹出时严禁空等 45 秒")
+                self.assertEqual(res1["status"], "authorization_pending")
+                self.assertFalse(res1["browser_opened"])
+                self.assertFalse(res1["resumed"])
+                self.assertEqual(res1["user_code"], "HM-XGFX")
+                self.assertIn("agent_action_required", res1)
+                self.assertIn("request_user_input", res1["agent_action_required"])
+                m_open1.assert_called_once_with(f"{mock_base}/activate?code=HM-XGFX")
+
+            # 3. 二次运行 auth login（resumed=True），用户尚未授权且宿主已放开权限（open_browser_url 返回 True）：
+            #    首次 poll 探查未授权后，必须立即补弹确认授权页面！
+            with mock.patch.object(client, "open_browser_url", return_value=True) as m_open2:
+                rc2, res2 = _run_cli(flags + ["auth", "login", "--wait-seconds", "0"])
+                self.assertEqual(rc2, 0)
+                self.assertEqual(res2["status"], "authorization_pending")
+                self.assertTrue(res2["resumed"])
+                self.assertTrue(res2["browser_opened"])
+                self.assertNotIn("agent_action_required", res2)
+                m_open2.assert_called_once_with(f"{mock_base}/activate?code=HM-XGFX")
+
+            # 4. 用户在刚刚弹出的确认页点完「确认授权此设备」后，三次运行 auth login（resumed=True）：
+            #    首轮 0 延迟 poll 直接命中 authorized，绝不再重复弹出多余标签页！
+            pair_state["approved"] = True
+            with mock.patch.object(client, "open_browser_url", return_value=True) as m_open3:
+                rc3, res3 = _run_cli(flags + ["auth", "login", "--wait-seconds", "5"])
+                self.assertEqual(rc3, 0)
+                self.assertEqual(res3["status"], "authorized")
+                self.assertEqual(res3["tier"], "pro")
+                m_open3.assert_not_called()
+        finally:
+            mock_srv.shutdown()
+            mock_srv.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

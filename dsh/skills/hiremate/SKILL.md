@@ -40,7 +40,8 @@ python3 "<SKILL_DIR>/hiremate.py" <子命令>
      - 建档落盘前必须将 `checklist` 返回的 `strategy_confirmation.markdown` 8 项规则完整列给用户确认是否修改：① 目标岗位；② 优先城市 + 异地大厂弹性（默认开启，`--remote-bigtech-flex false` 可关）；③ 最低月薪 + 面板标薪容忍度（默认开启，`--salary-panel-tolerance false` 可关）；④ 外包/派遣/OD 策略（默认排除）；⑤ 驻场办公策略（默认排除）；⑥ 猎头渠道策略（默认主动不投·仅接来信）；⑦ 前东家自动拉黑 + 额外屏蔽企业（`--blocked-companies`）+ 排除词（`--exclude-keywords`）；⑧ 被动求简历策略（`--inbound-resume-policy`）与自动化档位；
    - 先展示《求职建档与 8 项筛选策略确认单》请用户确认，再运行 `init --employers "..."` 并写入 `profile_facts_file`；核对 BOSS 本人显示名与线上附件名（`copilot` 模式口头确认）；
    - **【严禁建完档冷场停步】强制输出初始看板 + `1/2/3` 下一步菜单**：写入 `profile_facts_file` 后，**同一回复内必跑 `hiremate.py build-dashboard`** 生成初始看板，并在回复末尾向用户展示 `post_onboarding_guide.user_reply_menu_markdown`（免费版提示**直接回复 `1`** 立即去 BOSS 跑首轮搜岗深筛预览出审阅单、回复 `2` 粘贴单条 JD/HR 消息参谋、回复 `3` 查看看板或微调偏好；Pro 版提示回复 `1` 跑首轮深筛+未读检查、回复 `2` 挂载第 4 步工作日错峰自动巡检、回复 `3` 调 `semi`/`auto` 档位；`copilot` 模式引导直接贴入第一条岗位 JD 试跑）。用户回 `1` 即进入第 3 步执行！
-2b. **Pro 购买 / 设备绑定成功后的强制权益与全自动引导（严禁只回一句“绑定成功”停步！）**：
+2b. **Pro 购买 / 设备绑定弹窗兜底与激活引导（严禁假弹窗、严禁无链接问题框、严禁只回一句“绑定成功”停步！）**：
+   - 运行 `auth login`（切勿传 `--no-browser`）若返回 `authorization_pending` 且 `browser_opened: false`，说明沙盒拦截了系统浏览器拉起，**必须立即通过可见有头浏览器主动打开 `verification_uri_complete`**，并直接在普通回复正文贴出完整链接与配对码 `user_code`，**严禁先弹阻塞式提问框遮挡正文链接**；
    - 当 `auth login` 或 `auth status` 返回 JSON 中包含 `pro_activation_guide`（首次授权绑定或刚升级 Pro）时，必须向用户完整展示 **5 项已解锁 Pro 高级权益**（100+ 外包动态池、全自动模式解锁、真人短句答疑守卫、多版 PDF 简历路由、工作日自动巡检+约面桌面弹窗提醒），并**明确提醒用户当前「主动找岗」与「消息答疑」若仍为免费版默认的半自动（`semi`），现已可切换为全自动（`auto`）**，输出 `1 / 2 / 3 / 4` 选择菜单供用户一键开启全自动与定时巡检！
 3. **单轮深筛与网页三维防撞车**：
    - 若岗位右侧按钮已是「继续沟通」，传 `--chat-already-open` 调 `ledger check-dup` 直接跳过；

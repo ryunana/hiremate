@@ -229,19 +229,25 @@ def clear_pending_device(home: Path) -> None:
 
 
 def open_browser_url(url: str) -> bool:
-    """在本地桌面环境自动拉起系统默认浏览器打开配对页面（测试或无头模式自动跳过）。"""
+    """在本地桌面环境自动拉起系统默认浏览器打开配对页面（测试或无头模式自动跳过）。
+
+    注意：macOS 沙盒（如 Codex Seatbelt 沙盒）下 `/usr/bin/open` 会顺利 fork 启动但立即以非 0 退出码失败，
+    因此必须使用 `subprocess.run` 校验真实退出码，严禁使用 `Popen` 盲目返回 `True` 误导 Agent。
+    """
     if os.environ.get("HIREMATE_NO_BROWSER") == "1":
         return False
     if not (url.startswith("https://") or url.startswith("http://")):
         return False
     try:
         if sys.platform == "darwin":
-            subprocess.Popen(
+            res = subprocess.run(
                 ["open", url],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
             )
-            return True
+            return res.returncode == 0
         if sys.platform.startswith("win"):
             os.startfile(url)  # type: ignore[attr-defined]
             return True
@@ -438,9 +444,16 @@ def auth_device_login(
 
     verify_url = str(pending["verification_uri_complete"])
     user_code = str(pending["user_code"])
-    browser_opened = open_browser_url(verify_url) if (open_browser and not resumed) else False
+    browser_opened = False
+    browser_attempted = False
+    if open_browser and not resumed:
+        browser_attempted = True
+        browser_opened = open_browser_url(verify_url)
 
-    # 先立即探查一次（若用户刚刚在浏览器点过确认授权，0 延迟直接拿回凭证）
+    # 先立即探查一次：
+    # - 若 resumed=True 且用户刚刚已在浏览器点过确认授权，0 延迟直接拿回凭证，绝不重复弹多余标签页；
+    # - 若首次探查仍处于 authorization_pending，且 open_browser=True 但本轮尚未弹窗（resumed=True），
+    #   立即补弹确认页（修复首次因沙盒拦截/--no-wait/误关标签页后二次运行永远不弹窗的问题）。
     deadline = time.monotonic() + max(0, int(wait_seconds))
     poll_interval = max(0.4, min(float(pending.get("interval") or 2), 2.0))
 
@@ -523,9 +536,19 @@ def auth_device_login(
                 "message": p_data.get("message") or "设备配对码已过期，请重新运行 auth login。",
             }
 
+        if open_browser and not browser_attempted:
+            browser_attempted = True
+            browser_opened = open_browser_url(verify_url)
+            deadline = time.monotonic() + max(0, int(wait_seconds))
+
         now_mono = time.monotonic()
+        # 若浏览器未能弹出（例如沙盒拦截了系统 open 或传了 --no-browser），切勿盲等 45 秒浪费回合时间，
+        # 立即返回配对链接让 Agent 用有头浏览器主动打开并直接贴给用户。
+        if not browser_opened and ((not resumed) or open_browser):
+            deadline = now_mono
+
         if now_mono >= deadline:
-            return {
+            pending_payload: dict[str, Any] = {
                 "ok": True,
                 "status": "authorization_pending",
                 "user_code": user_code,
@@ -534,11 +557,25 @@ def auth_device_login(
                 "expires_at": pending.get("expires_at"),
                 "browser_opened": browser_opened,
                 "resumed": resumed,
-                "message": (
-                    f"请在浏览器打开 {verify_url} （核对配对码 {user_code}）并点击「确认授权此设备」。"
-                    "无需输入任何验证码；点击确认后再次运行 `hiremate.py auth login` 即可秒级完成绑定。"
-                ),
             }
+            if not browser_opened:
+                pending_payload["agent_action_required"] = (
+                    f"系统默认浏览器未能自动弹出确认页（可能受当前宿主沙盒限制，用户此刻尚未看到页面）！"
+                    f"请立即调用可见有头浏览器（如 ego lite / 宿主内置浏览器）主动打开 {verify_url} "
+                    f"（或申请宿主机非沙盒权限执行系统打开命令），并在普通回复正文中直接贴出完整链接 {verify_url} 与配对码 {user_code}；"
+                    f"严禁调用 request_user_input / 问题框等阻塞式弹窗等待确认（会遮挡正文链接导致用户找不到授权页）。"
+                )
+                pending_payload["message"] = (
+                    f"系统浏览器未能自动拉起，请立即为用户打开 {verify_url} （核对配对码 {user_code}）并点击「确认授权此设备」；"
+                    "同时务必在普通回复正文中完整展示该链接（严禁先弹无链接的问题输入框阻塞回合）。点击确认后再次运行 `hiremate.py auth login` 即可秒级完成绑定。"
+                )
+            else:
+                pending_payload["message"] = (
+                    f"已在系统浏览器弹出设备授权页：{verify_url} （配对码 {user_code}），请点击「确认授权此设备」。"
+                    "无需输入验证码；回复用户时请务必在普通正文中附上完整备用链接与配对码（严禁调用无链接的 request_user_input / 问题框阻塞遮挡正文），"
+                    "用户确认后再次运行 `hiremate.py auth login` 即可秒级完成绑定。"
+                )
+            return pending_payload
 
         sleep_dur = min(poll_interval, max(0.05, deadline - now_mono))
         time.sleep(sleep_dur)
@@ -560,7 +597,12 @@ def auth_open_upgrade(
     clean_plan = "pro_buyout"
     target_url = f"{api_base}/activate?plan={clean_plan}#subscribe-box"
     opened = open_browser_url(target_url) if open_browser else False
-    return {
+    suffix = (
+        "；稍后运行 `auth status` 即可同步激活。"
+        if creds
+        else "；支付完成后请运行 `auth login`（DSH 内运行 `/hiremate-login`）将本机绑定至该账户。"
+    )
+    res: dict[str, Any] = {
         "ok": True,
         "plan": clean_plan,
         "upgrade_url": target_url,
@@ -568,14 +610,21 @@ def auth_open_upgrade(
         "email": creds.get("email") if creds else None,
         "updates_policy": PRO_UPDATES_NOTE,
         "message": (
-            f"已打开站内 Pro 买断开通页：{target_url} 。完成微信/支付宝扫码支付 ¥69 后，买断权益将永久绑定至你的账户，无需输入任何激活码"
-            + (
-                "；稍后运行 `auth status` 即可同步激活。"
-                if creds
-                else "；支付完成后请运行 `auth login`（DSH 内运行 `/hiremate-login`）将本机绑定至该账户。"
+            (
+                f"已打开站内 Pro 买断开通页：{target_url} 。"
+                if opened
+                else f"系统浏览器未自动弹出，请立即在可见有头浏览器打开或在回复正文中直接附上 Pro 买断开通页：{target_url} 。"
             )
+            + "完成微信/支付宝扫码支付 ¥69 后，买断权益将永久绑定至你的账户，无需输入任何激活码"
+            + suffix
         ),
     }
+    if not opened:
+        res["agent_action_required"] = (
+            f"系统浏览器未能自动拉起（可能受宿主沙盒限制），请立即通过可见有头浏览器打开 {target_url} ，"
+            f"并在普通回复正文中完整展示该链接（切勿调用无链接的阻塞式提问框）。"
+        )
+    return res
 
 
 def auth_send_code(

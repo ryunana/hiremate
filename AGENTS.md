@@ -41,7 +41,9 @@ python3 ~/.hiremate/skill/hiremate/hiremate.py auth status
 ```
 
 - **【安全死红线】严禁使用 Headless 无头模式、每次新建空白临时窗口，或 `curl`/`wget`/Python `urllib`/`requests` 爬虫脚本请求 BOSS 直聘网页**（必触发反爬风控伤及用户账号）！
-- **若用户明确提到“登录 / 绑定账户 / 我买了 Pro / 开通 Pro”**：运行 `auth login` 完成免验证码浏览器设备配对（未购买需打开收银台时运行 `auth upgrade`，付完款后再跑 `auth login` 绑定本机或 `auth status` 同步）；**当返回 JSON 中包含 `pro_activation_guide`（首次绑定或刚升级为 Pro）时**，**严禁只说一句“登录成功”就停下**——必须向用户展示 `pro_activation_guide` 中的 **5 项已解锁 Pro 高级权益**，并明确告知当前「主动找岗」与「消息答疑」若仍为免费版默认的**半自动（`semi`）**，现已可切换为**全自动模式（`auto`）** + 开启工作日错峰自动巡检（若尚未建档则紧接着进入第三步建档）；日常会话中若老用户已展示过引导且无 `pro_activation_guide` 字段，则静默读取 `tier` 不重复打扰；
+- **若用户明确提到“登录 / 绑定账户 / 我买了 Pro / 开通 Pro”**：运行 `auth login` 完成免验证码浏览器设备配对（未购买需打开收银台时运行 `auth upgrade`，付完款后再跑 `auth login` 绑定本机或 `auth status` 同步）：
+  - **沙盒弹窗兜底与防「无链接问题框」铁律**：切勿传 `--no-browser`；在 `Codex` 等沙盒宿主中优先申请非沙盒权限运行 `auth login`。若返回 `status: "authorization_pending"` 且 `browser_opened: false`，说明沙盒拦截了系统 `open`，**用户根本没看到确认授权页**——你必须**立即用可见有头浏览器（`ego lite` 或宿主有头浏览器）主动打开返回的 `verification_uri_complete`**（或申请宿主机权限执行 `open`），并**直接在普通回复正文中贴出完整 URL `verification_uri_complete` 与配对码 `user_code`**；**严禁调用 `request_user_input` / `ask_question` 等阻塞式提问框等待网页登录或设备确认**（会在回复渲染前挂起回合、遮挡正文里的授权链接）！
+  - **当返回 JSON 中包含 `pro_activation_guide`（首次绑定或刚升级为 Pro）时**，**严禁只说一句“登录成功”就停下**——必须向用户展示 `pro_activation_guide` 中的 **5 项已解锁 Pro 高级权益**，并明确告知当前「主动找岗」与「消息答疑」若仍为免费版默认的**半自动（`semi`）**，现已可切换为**全自动模式（`auto`）** + 开启工作日错峰自动巡检（若尚未建档则紧接着进入第三步建档）；日常会话中若老用户已展示过引导且无 `pro_activation_guide` 字段，则静默读取 `tier` 不重复打扰；
 - **若为普通免费版新用户（未提及登录或付费）**：**绝不强制注册登录，绝不生硬推销付费**！开源免费版免登录即可完整使用。
 
 ## 第三步：向用户展示《四项启动准备核对单》与《8 项职位筛选策略表》，确认后建档
