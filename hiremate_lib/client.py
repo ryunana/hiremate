@@ -28,6 +28,7 @@ from .ledger import JobLedger
 from .normalize import deduplicate_company_list, employer_shield_match
 from .workspace import (
     atomic_write_text,
+    build_pro_activation_guide,
     get_effective_api_base,
     get_hiremate_home,
     inspect_onboarding_status,
@@ -248,6 +249,25 @@ def open_browser_url(url: str) -> bool:
         return False
 
 
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """防止重定向至明文 HTTP 或异源主机时泄露 Authorization Bearer Token。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+        orig_p = urlparse(req.full_url)
+        new_p = urlparse(new_req.full_url)
+        if new_p.scheme == "http" and (new_p.hostname or "").lower() not in ("127.0.0.1", "localhost", "::1"):
+            raise urllib.error.HTTPError(req.full_url, code, "Blocked insecure HTTP redirect", headers, fp)
+        if (orig_p.scheme, (orig_p.netloc or "").lower()) != (new_p.scheme, (new_p.netloc or "").lower()):
+            for hdr_dict in (new_req.headers, new_req.unredirected_hdrs):
+                for k in list(hdr_dict.keys()):
+                    if k.lower() == "authorization":
+                        del hdr_dict[k]
+        return new_req
+
+
 def _http_json(
     method: str,
     url: str,
@@ -258,7 +278,7 @@ def _http_json(
 ) -> tuple[int, dict[str, Any]]:
     headers: dict[str, str] = {
         "Accept": "application/json",
-        "User-Agent": "hiremate-open-cli/0.2.0",
+        "User-Agent": "hiremate-open-cli/0.6.1",
     }
     raw_body: bytes | None = None
     if body is not None:
@@ -274,8 +294,9 @@ def _http_json(
         return (0, {"ok": False, "code": "INSECURE_HTTP_BLOCKED", "message": "拒绝向非本机明文 HTTP 地址发起云端请求。"})
 
     req = urllib.request.Request(url=url, data=raw_body, headers=headers, method=method)
+    opener = urllib.request.build_opener(_SafeRedirectHandler())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             status = int(resp.status)
             resp_bytes = resp.read()
             try:
@@ -351,7 +372,8 @@ def config_to_pro_preferences(config: dict[str, Any]) -> dict[str, Any]:
         or ("block_all" if config.get("filter_onsite", True) else "allow_all")
     )
     return {
-        "blacklist_companies": list(config.get("blocked_companies") or []),
+        # 隐私保护硬边界：前东家与个人屏蔽名单已在客户端本机提前完成拦截，绝不随请求上传云端
+        "blacklist_companies": [],
         "exclude_keywords": list(config.get("exclude_keywords") or []),
         "block_outsourcing": out_policy == "block_all",
         "outsourcing_policy": out_policy,
@@ -444,6 +466,7 @@ def auth_device_login(
                     "expires_at": p_data.get("expires_at"),
                     "updates_included": bool(p_data.get("updates_included", active)),
                     "updates_policy": p_data.get("updates_policy") or PRO_UPDATES_NOTE,
+                    "pro_guide_shown": bool(active),
                 },
                 home=resolved_home,
             )
@@ -452,11 +475,16 @@ def auth_device_login(
             base_msg = (
                 f"设备绑定成功（{p_data.get('email')}）！Pro 专业版生效中（{validity_desc}）；{PRO_UPDATES_NOTE}。"
                 if active
-                else f"设备绑定成功（{p_data.get('email')}）！当前为免费基础版，可随时在官网账户中心 ¥39.9 买断解锁 Pro。"
+                else f"设备绑定成功（{p_data.get('email')}）！当前为免费基础版，可随时在官网账户中心特惠 ¥69（原价 ¥99）买断解锁 Pro。"
             )
             if not ob["onboarding_completed"]:
-                base_msg += " 检测到本机尚未建立求职档案，请继续引导用户拖入 PDF 简历完成 5 分钟建档与线上附件核验。"
-            return {
+                base_msg += " 检测到本机尚未建立求职档案，请先向用户报喜展示已解锁的 Pro 权益，再继续引导拖入 PDF 简历完成 5 分钟建档与策略确认。"
+            elif active and (cfg.get("mode_discover") == "semi" or cfg.get("mode_reply") == "semi"):
+                base_msg += (
+                    " 请务必告知用户已解锁的 5 项 Pro 高级权益，并明确提示：当前「主动找岗」与「消息答疑」仍处于半自动（semi），"
+                    "现已支持一键切换为「全自动模式（auto）」并开启工作日自动巡检（展示 pro_activation_guide 菜单供用户选择）！"
+                )
+            auth_res: dict[str, Any] = {
                 "ok": True,
                 "status": "authorized",
                 "email": p_data.get("email"),
@@ -475,6 +503,14 @@ def auth_device_login(
                 "next_action_hint": ob["next_action_hint"],
                 "message": base_msg,
             }
+            if active:
+                auth_res["pro_activation_guide"] = build_pro_activation_guide(
+                    workspace,
+                    cfg,
+                    email=str(p_data.get("email") or ""),
+                    validity_desc=validity_desc,
+                )
+            return auth_res
 
         err_code = str(p_data.get("code") or "")
         if err_code in ("EXPIRED_TOKEN", "TOKEN_ALREADY_CONSUMED", "INVALID_DEVICE_CODE"):
@@ -531,7 +567,12 @@ def auth_open_upgrade(
         "email": creds.get("email") if creds else None,
         "updates_policy": PRO_UPDATES_NOTE,
         "message": (
-            f"已打开站内 Pro 买断开通页：{target_url} 。完成微信/支付宝扫码支付 ¥39.9 后，买断权益将永久绑定至你的账户，无需输入任何激活码。"
+            f"已打开站内 Pro 买断开通页：{target_url} 。完成微信/支付宝扫码支付 ¥69 后，买断权益将永久绑定至你的账户，无需输入任何激活码"
+            + (
+                "；稍后运行 `auth status` 即可同步激活。"
+                if creds
+                else "；支付完成后请运行 `auth login`（DSH 内运行 `/hiremate-login`）将本机绑定至该账户。"
+            )
         ),
     }
 
@@ -601,11 +642,15 @@ def auth_verify_code(
             },
             home=resolved_home,
         )
-        return {
+        vc_email = str(data.get("email") or email.strip().lower())
+        is_lifetime_vc = bool(data.get("lifetime", data.get("days_left") is None and active))
+        validity_vc = "买断长期有效" if is_lifetime_vc else f"剩余 {data.get('days_left')} 天"
+        vc_res: dict[str, Any] = {
             "ok": True,
-            "email": data.get("email") or email.strip().lower(),
+            "email": vc_email,
             "tier": "pro" if active else "free",
             "active": active,
+            "lifetime": is_lifetime_vc,
             "expires_at": data.get("expires_at"),
             "days_left": data.get("days_left"),
             "updates_included": bool(data.get("updates_included", active)),
@@ -614,6 +659,14 @@ def auth_verify_code(
             "credentials_path": str(cred_file),
             "message": "设备绑定成功，本地凭证已按 0600 权限安全保存。",
         }
+        if active:
+            vc_res["pro_activation_guide"] = build_pro_activation_guide(
+                workspace,
+                cfg,
+                email=vc_email,
+                validity_desc=validity_vc,
+            )
+        return vc_res
 
     data["ok"] = False
     return data
@@ -661,6 +714,9 @@ def auth_status(
     if status == 200 and data.get("ok"):
         active = bool(data.get("active", data.get("tier") == "pro"))
         is_lifetime = bool(data.get("lifetime", data.get("days_left") is None and active))
+        was_pro_guide_shown = bool(creds.get("pro_guide_shown", False))
+        just_upgraded = (creds.get("tier") != "pro") and active
+        show_activation_guide = active and (just_upgraded or not was_pro_guide_shown)
         refreshed = dict(creds)
         refreshed.update(
             {
@@ -672,11 +728,21 @@ def auth_status(
                 "expires_at": data.get("expires_at"),
                 "updates_included": bool(data.get("updates_included", active)),
                 "updates_policy": data.get("updates_policy") or PRO_UPDATES_NOTE,
+                "pro_guide_shown": True if active else False,
             }
         )
         save_credentials(refreshed, home=resolved_home)
         validity_desc = "买断长期有效" if is_lifetime else f"剩余 {refreshed['days_left']} 天"
-        return {
+        status_msg = (
+            f"Pro 专业版生效中（{validity_desc}）· {PRO_UPDATES_NOTE}。"
+            if active
+            else (str(data.get("message") or "").strip() or FREE_DOWNGRADE_MESSAGE)
+        )
+        if show_activation_guide and ob["onboarding_completed"] and (
+            cfg.get("mode_discover") == "semi" or cfg.get("mode_reply") == "semi"
+        ):
+            status_msg += " 提示：当前主动找岗/消息答疑仍处于半自动（semi），请向用户介绍 Pro 5 项高级功能并询问是否切换为全自动模式（auto）与开启工作日自动巡检。"
+        st_res: dict[str, Any] = {
             "ok": True,
             "authenticated": True,
             "email": refreshed["email"],
@@ -692,12 +758,16 @@ def auth_status(
             "initialized": ob["initialized"],
             "onboarding_completed": ob["onboarding_completed"],
             "next_action_hint": ob["next_action_hint"],
-            "message": (
-                f"Pro 专业版生效中（{validity_desc}）· {PRO_UPDATES_NOTE}。"
-                if active
-                else (str(data.get("message") or "").strip() or FREE_DOWNGRADE_MESSAGE)
-            ),
+            "message": status_msg,
         }
+        if show_activation_guide:
+            st_res["pro_activation_guide"] = build_pro_activation_guide(
+                workspace,
+                cfg,
+                email=str(refreshed.get("email") or ""),
+                validity_desc=validity_desc,
+            )
+        return st_res
 
     # 离线或云端暂不可达时，若本机缓存的已验证凭证为 Pro，给出明确的离线缓存态而非误导用户权益丢失
     if status in (0, 502, 503, 504) and creds.get("tier") == "pro":
@@ -834,12 +904,21 @@ def pro_patrol_gate(
     api_base_override: str | None = None,
     now_override: str | None = None,
 ) -> dict[str, Any]:
+    cfg = load_config(workspace)
+    if str(cfg.get("execution_mode") or "browser") == "copilot":
+        return {
+            "ok": True,
+            "in_active_window": False,
+            "allow_unread_check": False,
+            "discover_due": False,
+            "reason": "COPILOT_MODE_NO_BROWSER",
+            "message": "当前处于副驾驶粘贴模式（无浏览器直连操控权限），已自动跳过后台定时巡检。",
+        }
+
     resolved_home = home or get_hiremate_home()
     creds = load_credentials(resolved_home)
     if not creds:
         return _graceful_pro_fallback("patrol_gate", 401, {"code": "NO_LOCAL_CREDENTIALS"})
-
-    cfg = load_config(workspace)
     rt = load_runtime_state(workspace)
     ledger = JobLedger(workspace)
     summary = ledger.summary()
@@ -915,6 +994,10 @@ def pro_evaluate_job(
         normalized_job["salary_text"] = normalized_job["salary"]
     if "jd_text" not in normalized_job and "jd" in normalized_job:
         normalized_job["jd_text"] = normalized_job["jd"]
+    if "is_inbound_recruiter" not in normalized_job:
+        ch = str(normalized_job.get("channel") or normalized_job.get("source") or "").strip().lower()
+        if ch == "inbound":
+            normalized_job["is_inbound_recruiter"] = True
 
     body = {
         "action": "evaluate_job",
@@ -943,13 +1026,8 @@ def pro_guard_reply(
     home: Path | None = None,
     api_base_override: str | None = None,
 ) -> dict[str, Any]:
-    resolved_home = home or get_hiremate_home()
-    creds = load_credentials(resolved_home)
-    if not creds:
-        return _graceful_pro_fallback("guard_reply", 401, {"code": "NO_LOCAL_CREDENTIALS"})
-
     cfg = load_config(workspace)
-    job_part = input_data.get("job") if isinstance(input_data.get("job"), dict) else {}
+    job_part = dict(input_data["job"]) if isinstance(input_data.get("job"), dict) else {}
     if isinstance(input_data.get("conversation"), dict):
         conv_part = dict(input_data["conversation"])
     else:
@@ -961,8 +1039,40 @@ def pro_guard_reply(
         job_part = {
             "title": input_data.get("title", ""),
             "company": input_data.get("company", ""),
-            "jd_text": input_data.get("jd_text", ""),
+            "jd_text": input_data.get("jd_text", input_data.get("jd", "")),
         }
+    elif "jd_text" not in job_part and "jd" in job_part:
+        job_part["jd_text"] = job_part["jd"]
+    if "is_inbound_recruiter" not in job_part:
+        ch = str(job_part.get("channel") or job_part.get("source") or "").strip().lower()
+        if ch == "inbound":
+            job_part["is_inbound_recruiter"] = True
+
+    comp_guard = str(job_part.get("company") or "").strip()
+    if comp_guard:
+        all_shielded = deduplicate_company_list(
+            list(cfg.get("blocked_companies") or []) + list(cfg.get("past_employers") or [])
+        )
+        for blk in all_shielded:
+            if employer_shield_match(comp_guard, blk):
+                return {
+                    "ok": True,
+                    "code": "LOCAL_EMPLOYER_SHIELD_BLOCKED",
+                    "tier": "pro",
+                    "handoff_required": True,
+                    "handoff_reasons": [f"本地前东家/屏蔽企业保护拦截（匹配：{blk}），禁止自动回复"],
+                    "reply_approved": False,
+                    "allow_auto_send": False,
+                    "violations": ["命中本地屏蔽企业保护"],
+                    "sanitized_suggestion": "",
+                    "recommended_resume": None,
+                    "is_rejection_closing": False,
+                }
+
+    resolved_home = home or get_hiremate_home()
+    creds = load_credentials(resolved_home)
+    if not creds:
+        return _graceful_pro_fallback("guard_reply", 401, {"code": "NO_LOCAL_CREDENTIALS"})
 
     body = {
         "action": "guard_reply",

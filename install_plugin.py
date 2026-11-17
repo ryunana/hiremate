@@ -40,9 +40,12 @@ DSH_PATCH_END = "# hiremate-dsh:end"
 HOST_CANDIDATES: tuple[tuple[str, str, str], ...] = (
     ("workbuddy", "WORKBUDDY_HOME", "~/.workbuddy"),
     ("dsh", "DSH_HOME", "~/.dsh"),
+    ("antigravity", "AGY_CONFIG_HOME", "~/.gemini/config"),
     ("agents", "AGENTS_HOME", "~/.agents"),
     ("claude", "CLAUDE_HOME", "~/.claude"),
     ("codex", "CODEX_HOME", "~/.codex"),
+    ("cursor", "CURSOR_HOME", "~/.cursor"),
+    ("windsurf", "WINDSURF_HOME", "~/.codeium/windsurf"),
 )
 
 
@@ -69,9 +72,39 @@ def _host_root_dir(host: str, dest_root: str | None = None) -> Path:
     raise ValueError(f"未知目标宿主：{host}")
 
 
+def _is_windows_reparse_point(path: Path) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    try:
+        st = path.lstat()
+        return bool(getattr(st, "st_file_attributes", 0) & 0x400)
+    except OSError:
+        return False
+
+
+def _remove_link_or_dir(path: Path) -> bool:
+    """安全移除目录软链、Windows Junction 或实体目录（兼容 Python 3.9~3.13，绝不误穿透 Junction）。"""
+    if path.is_symlink():
+        path.unlink()
+        return True
+    if _is_windows_reparse_point(path):
+        os.rmdir(path)
+        return True
+    if not path.exists():
+        return False
+    if path.is_dir():
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            os.rmdir(path)
+        return True
+    path.unlink()
+    return True
+
+
 def _copy_runtime_into(dest_dir: Path, skill_src: Path) -> list[str]:
-    if dest_dir.is_symlink():
-        dest_dir.unlink()
+    if dest_dir.is_symlink() or _is_windows_reparse_point(dest_dir):
+        _remove_link_or_dir(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(skill_src, dest_dir / "SKILL.md")
     installed = [str(dest_dir / "SKILL.md")]
@@ -80,10 +113,7 @@ def _copy_runtime_into(dest_dir: Path, skill_src: Path) -> list[str]:
         src = OPEN_ROOT / name
         dst = dest_dir / name
         if src.is_dir():
-            if dst.is_symlink():
-                dst.unlink()
-            elif dst.exists():
-                shutil.rmtree(dst)
+            _remove_link_or_dir(dst)
             shutil.copytree(
                 src,
                 dst,
@@ -100,10 +130,7 @@ def _copy_runtime_into(dest_dir: Path, skill_src: Path) -> list[str]:
 def _link_skill_dir(source_dir: Path, target_link: Path) -> str:
     """建立目录软链（Windows 无管理员权限时自动回退 Junction 或目录拷贝）。"""
     target_link.parent.mkdir(parents=True, exist_ok=True)
-    if target_link.is_symlink():
-        target_link.unlink()
-    elif target_link.exists():
-        shutil.rmtree(target_link)
+    _remove_link_or_dir(target_link)
 
     try:
         os.symlink(str(source_dir), str(target_link), target_is_directory=True)
@@ -276,11 +303,7 @@ def uninstall(
     unpatched_files: list[str] = []
     for h_name, h_root in hosts:
         link_path = h_root / "skills" / "hiremate"
-        if link_path.is_symlink():
-            link_path.unlink()
-            removed_links.append(str(link_path))
-        elif link_path.exists():
-            shutil.rmtree(link_path)
+        if _remove_link_or_dir(link_path):
             removed_links.append(str(link_path))
 
         if h_name == "dsh":
@@ -294,16 +317,12 @@ def uninstall(
                     if _strip_dsh_cordis_patch(prof / "cordis.patch.yml"):
                         unpatched_files.append(str(prof / "cordis.patch.yml"))
                     pkg_link = prof / "node_modules" / "hiremate-dsh"
-                    if pkg_link.is_symlink():
-                        pkg_link.unlink()
-                    elif pkg_link.exists():
-                        shutil.rmtree(pkg_link)
+                    _remove_link_or_dir(pkg_link)
 
     for target_dir in (canon_dir, dsh_plugin_dir):
-        if target_dir.is_symlink():
-            target_dir.unlink()
-        elif target_dir.exists():
-            shutil.rmtree(target_dir)
+        if target_dir == dsh_plugin_dir and (dsh_plugin_dir / "skills" / "hiremate").exists():
+            _remove_link_or_dir(dsh_plugin_dir / "skills" / "hiremate")
+        _remove_link_or_dir(target_dir)
 
     skill_parent = home_dir / "skill"
     if skill_parent.is_dir() and not any(skill_parent.iterdir()):
@@ -457,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--target",
         default="auto",
-        choices=("auto", "workbuddy", "dsh", "agents", "claude", "codex"),
+        choices=("auto", "workbuddy", "dsh", "antigravity", "agents", "claude", "codex", "cursor", "windsurf"),
         help="目标宿主（默认 auto：安装一份主副本至 ~/.hiremate/skill/hiremate 并软链至全部已安装宿主）",
     )
     parser.add_argument("--dest-root", help="可选覆盖单宿主根目录（测试或自定义目录用）")

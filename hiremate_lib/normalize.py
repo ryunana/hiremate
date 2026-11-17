@@ -7,6 +7,8 @@ import re
 import shutil
 import subprocess
 from typing import Any, Iterable
+import xml.etree.ElementTree as ET
+import zipfile
 
 REGION_PREFIXES: tuple[str, ...] = (
     "中国",
@@ -36,6 +38,30 @@ REGION_PREFIXES: tuple[str, ...] = (
     "大连市", "大连",
     "无锡市", "无锡",
     "昆明市", "昆明",
+    "南昌市", "南昌",
+    "石家庄市", "石家庄",
+    "太原市", "太原",
+    "沈阳市", "沈阳",
+    "长春市", "长春",
+    "哈尔滨市", "哈尔滨",
+    "南宁市", "南宁",
+    "海口市", "海口",
+    "贵阳市", "贵阳",
+    "兰州市", "兰州",
+    "西宁市", "西宁",
+    "银川市", "银川",
+    "乌鲁木齐市", "乌鲁木齐",
+    "常州市", "常州",
+    "徐州市", "徐州",
+    "南通市", "南通",
+    "温州市", "温州",
+    "嘉兴市", "嘉兴",
+    "金华市", "金华",
+    "绍兴市", "绍兴",
+    "台州市", "台州",
+    "烟台市", "烟台",
+    "惠州市", "惠州",
+    "中山市", "中山",
     "广东省", "广东",
     "浙江省", "浙江",
     "江苏省", "江苏",
@@ -46,7 +72,25 @@ REGION_PREFIXES: tuple[str, ...] = (
     "福建省", "福建",
     "安徽省", "安徽",
     "陕西省", "陕西",
-    "香港",
+    "江西省", "江西",
+    "河北省", "河北",
+    "山西省", "山西",
+    "辽宁省", "辽宁",
+    "吉林省", "吉林",
+    "黑龙江省", "黑龙江",
+    "河南省", "河南",
+    "海南省", "海南",
+    "贵州省", "贵州",
+    "云南省", "云南",
+    "甘肃省", "甘肃",
+    "青海省", "青海",
+    "台湾省", "台湾",
+    "内蒙古自治区", "内蒙古",
+    "广西壮族自治区", "广西",
+    "西藏自治区", "西藏",
+    "宁夏回族自治区", "宁夏",
+    "新疆维吾尔自治区", "新疆",
+    "香港", "澳门",
 )
 
 LEGAL_SUFFIXES: tuple[str, ...] = (
@@ -127,33 +171,91 @@ _BRACKET_INNER_RE = re.compile(r"[\(（\[【]([^\)）\]】]{2,30})[\)）\]】]")
 _BRACKET_NOISE_WORDS: frozenset[str] = frozenset({
     "集团", "控股", "总部", "总公司", "分公司", "子公司", "有限合伙", "普通合伙",
     "中国", "大中华区", "亚太", "华南", "华东", "华北", "华中", "西南", "西北", "东北",
-    "研发中心", "技术中心", "交付中心", "运营中心",
+    "研发中心", "技术中心", "交付中心", "运营中心", "共享中心", "创新中心",
+    "china", "prc", "global", "international", "asia", "apac", "hk", "usa", "us", "uk", "jp", "sg",
+    "group", "holding", "holdings", "inc", "ltd", "limited", "corp", "corporation", "co", "company",
+    "外包", "驻场", "外派", "派遣", "直招", "自研", "代招", "猎头", "本部",
+    "上市公司", "已上市", "上市", "国企", "央企", "外企", "民企", "合资", "独资", "独角兽",
+    "未融资", "不需要融资", "天使轮", "种子轮", "prea轮", "prea", "a轮", "b轮", "c轮", "d轮",
+    "e轮", "f轮", "preipo", "ipo", "战略融资",
 })
+_BRACKET_STAGE_OR_SCALE_RE = re.compile(
+    r"^(?:[a-f]\+?轮|pre[\-]?[a-c]轮?|\d+\s*[-~至]\s*\d+\s*人|\d+人以上)$",
+    re.IGNORECASE,
+)
 
 # 常见工商注册主体字号 <-> 招聘平台展示品牌名映射（用于前东家防社死精准关联）
 CORPORATE_GROUP_ALIASES: tuple[frozenset[str], ...] = (
     frozenset({"拉扎斯", "饿了么"}),
     frozenset({"三快", "三快在线", "美团", "大众点评"}),
-    frozenset({"字节跳动", "抖音", "今日头条", "飞书", "火山引擎"}),
-    frozenset({"阿里巴巴", "阿里", "淘天", "淘宝", "天猫"}),
-    frozenset({"蚂蚁", "蚂蚁金服", "支付宝"}),
+    frozenset({"字节跳动", "字节", "抖音", "今日头条", "飞书", "火山引擎", "字跳", "有竹居", "脸萌"}),
+    frozenset({"阿里巴巴", "阿里", "阿里云", "阿里健康", "阿里国际", "阿里影业", "阿里妈妈", "淘天", "淘宝", "天猫"}),
+    frozenset({"蚂蚁", "蚂蚁金服", "蚂蚁集团", "支付宝"}),
     frozenset({"腾讯", "微信", "腾讯云"}),
-    frozenset({"华为", "海思", "慧通", "慧通商务"}),
+    frozenset({"华为", "海思", "海思半导体", "慧通", "慧通商务"}),
     frozenset({"京东", "京东世纪", "达达"}),
     frozenset({"拼多多", "寻梦", "寻梦信息"}),
     frozenset({"滴滴", "小桔", "小桔科技"}),
     frozenset({"快手", "达佳", "达佳互联"}),
     frozenset({"小红书", "行吟", "行吟信息"}),
     frozenset({"得物", "识装", "识装信息"}),
-    frozenset({"看准", "boss直聘"}),
+    frozenset({"看准", "boss直聘", "华品博睿"}),
     frozenset({"百度", "百度在线", "百度网讯"}),
-    frozenset({"网易", "有道", "网易有道"}),
+    frozenset({"网易", "有道", "网易有道", "网之易", "博冠"}),
+    frozenset({"哔哩哔哩", "bilibili", "宽娱", "宽娱数码", "幻电", "幻电信息"}),
+    frozenset({"携程", "携程计算机", "去哪儿", "趣拿", "去哪儿网"}),
+    frozenset({"招银", "招商银行", "招银网络"}),
+    frozenset({"平安", "中国平安", "平安保险", "平安集团", "平安科技", "平安普惠", "平安产险", "平安寿险", "平安健康", "平安银行"}),
 )
+
+# 允许在集团关联匹配中向子品牌做前缀衍生的主品牌词（排除“阿里->阿里斯顿”“博冠->博冠光电”“海思->海思科医药”等跨行业重名误伤）
+GROUP_PREFIX_BRANDS: frozenset[str] = frozenset({
+    "华为", "腾讯", "京东", "美团", "字节跳动", "哔哩哔哩", "百度", "网易",
+    "蚂蚁", "携程", "滴滴", "快手", "小米", "拼多多", "小红书", "得物", "招商银行",
+})
+
+# 同一企业工商注册名 <-> 对外招聘品牌名映射（用于账本同公司查重 companies_match）
+LEGAL_ENTITY_BRAND_PAIRS: tuple[frozenset[str], ...] = (
+    frozenset({"拉扎斯", "饿了么"}),
+    frozenset({"三快", "三快在线", "美团"}),
+    frozenset({"字跳", "有竹居", "字节跳动", "抖音"}),
+    frozenset({"寻梦", "寻梦信息", "拼多多"}),
+    frozenset({"行吟", "行吟信息", "小红书"}),
+    frozenset({"达佳", "达佳互联", "快手"}),
+    frozenset({"识装", "识装信息", "得物"}),
+    frozenset({"华品博睿", "看准", "boss直聘"}),
+    frozenset({"宽娱", "宽娱数码", "幻电", "幻电信息", "哔哩哔哩", "bilibili"}),
+    frozenset({"小桔", "小桔科技", "滴滴"}),
+    frozenset({"百度在线", "百度网讯", "百度"}),
+    frozenset({"京东世纪", "京东"}),
+)
+
 _PUNCT_RE = re.compile(r"[\s·•\-—_/,，。、|｜:：;；\"'“”‘’]+")
-_TITLE_NOISE_RE = re.compile(r"(急聘|诚聘|直招|双休|高薪|六险一金|五险一金|弹性打卡)")
+_TITLE_NOISE_RE = re.compile(r"(急聘|诚聘|直招|双休|周末双休|高薪|六险一金|五险一金|弹性打卡|包吃住|全职|社招|校招)")
+_TITLE_BRACKET_SALARY_RE = re.compile(r"\d+\s*[-~至]?\s*\d*\s*[kKwW万薪]+")
+_TITLE_BRACKET_SUFFIX_NOISE_RE = re.compile(r"(?:方向|业务|岗位|团队|部门|事业部|岗|组|部|线)$")
+_TITLE_RANK_RE = re.compile(r"^(?:高级|资深|初级|中级|首席|专家级|助理|实习|特聘|资深级)+")
+_TITLE_GENERIC_ROLE_RE = re.compile(
+    r"(?:产品经理|后端开发工程师|前端开发工程师|全栈开发工程师|客户端开发工程师|软件开发工程师|"
+    r"开发工程师|研发工程师|算法工程师|测试工程师|测试开发工程师|运维工程师|安全工程师|数据工程师|"
+    r"后端工程师|前端工程师|软件工程师|数据分析师|商业分析师|项目经理|运营经理|运营专员|增长运营|"
+    r"产品运营|交互设计师|视觉设计师|ui设计师|设计师|产品总监|技术总监|研发总监|负责人|总监|专家|经理|工程师|专员)$"
+)
 _ASCII_WORD_RE = re.compile(r"[a-z0-9+#.]+")
 _COMPANY_EXTRACT_RE = re.compile(
-    r"([\u4e00-\u9fa5A-Za-z0-9]{2,24}(?:集团股份有限公司|股份有限公司|有限责任公司|集团有限公司|科技有限公司|网络科技有限公司|信息技术有限公司|软件技术有限公司|数字科技有限公司|智能科技有限公司|有限公司|科技集团|控股集团))"
+    r"([\u4e00-\u9fa5A-Za-z0-9]{2,20}(?:[\(（][\u4e00-\u9fa5A-Za-z]{2,10}[\)）])?[\u4e00-\u9fa5A-Za-z0-9]{0,12}"
+    r"(?:集团股份有限公司|控股集团有限公司|股份有限公司|有限责任公司|集团有限公司|控股有限公司|"
+    r"网络科技有限公司|信息科技有限公司|数字科技有限公司|智能科技有限公司|软件技术有限公司|信息技术有限公司|"
+    r"网络技术有限公司|科技有限公司|网络有限公司|技术有限公司|软件有限公司|有限公司|科技集团|控股集团))"
+)
+_COMPANY_LEADING_NARRATIVE_RE = re.compile(
+    r"^(?:.*?(?:曾就职于|现就职于|就职于|曾任职于|任职于|供职于|受雇于|工作于|服务于|毕业后入职|入职于|加入|入职|"
+    r"曾在|我在|本人于|本人在|曾任|现任|历任|实习于|工作经历|工作单位|任职公司|所在公司)|\d+[年./\-月日至今\s~到]*)+"
+)
+_PARTNER_COMPANY_CLAUSE_RE = re.compile(
+    r"(?:负责|主导|参与|配合|推进)?(?:与|和|同|跟|面向|对接|服务客户|合作方|客户为|甲方为)"
+    r"[\u4e00-\u9fa5A-Za-z0-9()（）]{2,26}(?:有限公司|股份有限公司|集团)"
+    r"(?:的?(?:合作|对接|联调|交付|项目|业务|采购))?"
 )
 _LABELED_EMPLOYER_RE = re.compile(
     r"(?:公司名称|任职公司|工作单位|就职企业|所在公司)[：:]\s*([\u4e00-\u9fa5A-Za-z0-9·()（）\-]{2,30})"
@@ -299,25 +401,37 @@ def normalize_company(raw: str) -> str:
     return core
 
 
-def extract_company_aliases(raw: str) -> list[str]:
-    """提取企业主体名称及括号内有意义的品牌别名（如 '拉扎斯网络科技（上海）有限公司（饿了么）' -> 保留 '饿了么'）。"""
+def _extract_tagged_company_aliases(raw: str) -> list[tuple[str, bool]]:
+    """提取 (候选名, 是否来自括号附加词)，防止两家不同公司因相同地域/属性括号发生交叉误匹配。"""
     if not raw or not raw.strip():
         return []
-    candidates: list[str] = [raw.strip()]
+    tagged: list[tuple[str, bool]] = [(raw.strip(), False)]
     without_brackets = _BRACKET_RE.sub("", raw).strip()
-    if len(without_brackets) >= 2 and without_brackets not in candidates:
-        candidates.append(without_brackets)
+    if len(without_brackets) >= 2 and without_brackets != raw.strip():
+        tagged.append((without_brackets, False))
 
     for inner in _BRACKET_INNER_RE.findall(raw):
-        token = _PUNCT_RE.sub("", inner).strip().lower()
+        raw_inner = inner.strip()
+        token = _PUNCT_RE.sub("", raw_inner).strip().lower()
         if len(token) < 2:
             continue
         if token in REGION_PREFIXES or token in GENERIC_SOLO_WORDS or token in _BRACKET_NOISE_WORDS:
             continue
+        if _BRACKET_STAGE_OR_SCALE_RE.match(raw_inner) or _BRACKET_STAGE_OR_SCALE_RE.match(token):
+            continue
+        if len(token) <= 5 and token.endswith(("省", "市", "区", "县", "镇", "片区", "分部", "园区")):
+            continue
+        if any(n in token for n in ("猎头", "代招", "独角兽", "某知名", "某头部", "外派", "驻场", "外包", "上市")):
+            continue
         if any(token == suf for suf in LEGAL_SUFFIXES):
             continue
-        candidates.append(inner.strip())
-    return candidates
+        tagged.append((raw_inner, True))
+    return tagged
+
+
+def extract_company_aliases(raw: str) -> list[str]:
+    """提取企业主体名称及括号内有意义的品牌别名（如 '拉扎斯网络科技（上海）有限公司（饿了么）' -> 保留 '饿了么'）。"""
+    return [name for name, _is_bracket in _extract_tagged_company_aliases(raw)]
 
 
 def _in_same_corporate_group(core_a: str, core_b: str) -> bool:
@@ -329,82 +443,166 @@ def _in_same_corporate_group(core_a: str, core_b: str) -> bool:
     return False
 
 
-def companies_match(company_a: str, company_b: str) -> bool:
-    """判断两个公司名称是否指向同一企业主体。"""
-    clean_a, core_a = normalize_company_parts(company_a)
-    clean_b, core_b = normalize_company_parts(company_b)
+def _in_same_legal_brand_pair(core_a: str, core_b: str) -> bool:
     if not core_a or not core_b:
         return False
-    if core_a == core_b or clean_a == clean_b:
-        return True
-    # 处理如“示例云”与“示例云计算”但避免普通岗位判重短字误伤
-    if len(core_a) >= 3 and (core_b.startswith(core_a) or clean_b.startswith(core_a)):
-        return True
-    if len(core_b) >= 3 and (core_a.startswith(core_b) or clean_a.startswith(core_b)):
-        return True
+    for pair in LEGAL_ENTITY_BRAND_PAIRS:
+        if core_a in pair and core_b in pair:
+            return True
+    return False
+
+
+def companies_match(company_a: str, company_b: str) -> bool:
+    """判断两个公司名称是否指向同一企业主体（兼容括号品牌名与常见工商注册字号互通，禁止纯括号词互撞）。"""
+    tagged_a = _extract_tagged_company_aliases(company_a)
+    tagged_b = _extract_tagged_company_aliases(company_b)
+    if not tagged_a or not tagged_b:
+        return False
+
+    parts_a = [(*normalize_company_parts(a), is_b) for a, is_b in tagged_a]
+    parts_b = [(*normalize_company_parts(b), is_b) for b, is_b in tagged_b]
+    for clean_a, core_a, is_b_a in parts_a:
+        if not core_a:
+            continue
+        for clean_b, core_b, is_b_b in parts_b:
+            if not core_b:
+                continue
+            if is_b_a and is_b_b:
+                continue
+            if core_a == core_b or clean_a == clean_b:
+                return True
+            if _in_same_legal_brand_pair(core_a, core_b):
+                return True
+            # 处理如“示例云”与“示例云计算”但避免普通岗位判重短字误伤
+            if len(core_a) >= 3 and not is_b_a and (core_b.startswith(core_a) or clean_b.startswith(core_a)):
+                return True
+            if len(core_b) >= 3 and not is_b_b and (core_a.startswith(core_b) or clean_a.startswith(core_b)):
+                return True
     return False
 
 
 def employer_shield_match(candidate_company: str, shielded_company: str) -> bool:
     """前东家与黑名单专用高敏拦截匹配：
-    1. 支持括号内品牌别名（如 '拉扎斯（饿了么）' 拦截 '饿了么'）；
-    2. 支持 2 字及以上品牌核心词对子品牌/业务线的前缀覆盖（如 '华为' -> '华为终端'、'京东' -> '京东物流'、'腾讯' -> '腾讯音乐娱乐'）；
-    3. 支持常见互联网大厂注册工商字号与展示品牌互通（如 '三快在线' <-> '美团'、'拉扎斯' <-> '饿了么'）。
+    1. 支持括号内品牌别名（如 '拉扎斯（饿了么）' 拦截 '饿了么'，且禁止双侧括号附加词互撞）；
+    2. 支持品牌核心词对子品牌/业务线的前缀覆盖（如 '华为' -> '华为终端'、'京东' -> '京东物流'、'腾讯' -> '腾讯音乐娱乐'）；
+    3. 支持常见互联网大厂注册工商字号与展示品牌互通（如 '三快在线' <-> '美团'、'拉扎斯' <-> '饿了么'、'字跳' <-> '字节跳动'）。
     """
-    cand_aliases = extract_company_aliases(candidate_company)
-    shield_aliases = extract_company_aliases(shielded_company)
-    if not cand_aliases or not shield_aliases:
+    cand_tagged = _extract_tagged_company_aliases(candidate_company)
+    shield_tagged = _extract_tagged_company_aliases(shielded_company)
+    if not cand_tagged or not shield_tagged:
         return False
 
-    cand_parts = [(a, *normalize_company_parts(a)) for a in cand_aliases]
-    shield_parts = [(b, *normalize_company_parts(b)) for b in shield_aliases]
+    cand_parts = [(a, *normalize_company_parts(a), is_b) for a, is_b in cand_tagged]
+    shield_parts = [(b, *normalize_company_parts(b), is_b) for b, is_b in shield_tagged]
 
-    for _raw_c, clean_c, core_c in cand_parts:
+    for _raw_c, clean_c, core_c, is_b_c in cand_parts:
         if not core_c:
             continue
-        for raw_s, clean_s, core_s in shield_parts:
+        for raw_s, clean_s, core_s, is_b_s in shield_parts:
             if not core_s:
+                continue
+            if is_b_c and is_b_s:
                 continue
             if core_c == core_s or clean_c == clean_s:
                 return True
             if _in_same_corporate_group(core_c, core_s):
                 return True
-            # 3 字及以上核心名允许双向前缀匹配；2 字核心名仅在知名大厂品牌或用户显式填写简称（clean_s == core_s）时覆盖子公司，防止“东方网络”误杀“东方财富”
+            # 3 字及以上核心名允许双向前缀匹配（排除“阿里”单前缀误杀“阿里斯顿”）；2 字核心名仅限明确品牌或简称
             raw_s_compact = _PUNCT_RE.sub("", _BRACKET_RE.sub("", raw_s)).lower()
-            allow_short_s = len(core_s) >= 3 or (
+            allow_short_s = (len(core_s) >= 3 and not is_b_s) or (
                 len(core_s) == 2
+                and not is_b_s
+                and core_s != "阿里"
                 and core_s not in GENERIC_SOLO_WORDS
                 and (core_s in KNOWN_BRAND_CORES or clean_s == core_s or raw_s_compact == core_s)
             )
             if allow_short_s and (core_c.startswith(core_s) or clean_c.startswith(core_s)):
                 return True
-            allow_short_c = len(core_c) >= 3 or (
-                len(core_c) == 2 and core_c not in GENERIC_SOLO_WORDS and core_c in KNOWN_BRAND_CORES
+            # 若 2 字核心名来自完整工商主体（如“深圳元象信息科技有限公司” -> core_s="元象"），候选为“中文核心+英文品牌后缀”（如“元象XVERSE”），精准拦截且不误伤其他四字中文词
+            if (
+                len(core_s) == 2
+                and not is_b_s
+                and core_s not in GENERIC_SOLO_WORDS
+                and core_c.startswith(core_s)
+                and len(core_c) > 2
+                and core_c[2:].isascii()
+            ):
+                return True
+            allow_short_c = (len(core_c) >= 3 and not is_b_c) or (
+                len(core_c) == 2
+                and not is_b_c
+                and core_c != "阿里"
+                and core_c not in GENERIC_SOLO_WORDS
+                and core_c in KNOWN_BRAND_CORES
             )
             if allow_short_c and (core_s.startswith(core_c) or clean_s.startswith(core_c)):
                 return True
-            # 对集团关联核心词同步允许前缀衍生（如前东家填 '北京三快在线' -> 拦截 '美团优选'）
+            # 仅允许集团组内的核心主品牌词（GROUP_PREFIX_BRANDS）做子业务前缀衍生，防止“博冠->博冠光电”“海思->海思科医药”误伤
             for group in CORPORATE_GROUP_ALIASES:
                 if core_s in group:
                     if any(
-                        len(alias) >= 2 and (core_c == alias or core_c.startswith(alias) or clean_c.startswith(alias))
+                        (core_c == alias or clean_c == alias)
+                        or (alias in GROUP_PREFIX_BRANDS and (core_c.startswith(alias) or clean_c.startswith(alias)))
                         for alias in group
                     ):
                         return True
     return False
 
 
+def _clean_title_bracket_content(match: re.Match[str]) -> str:
+    """保留岗位括号内有区分度的方向/语言限定词（如 AI方向、电商交易、Go、Java），仅剥离双休/急聘/城市行政区/薪资等噪声。"""
+    inner = (match.group(0)[1:-1] or "").strip().lower()
+    if not inner:
+        return " "
+    inner = _TITLE_NOISE_RE.sub(" ", inner)
+    inner = _TITLE_BRACKET_SALARY_RE.sub(" ", inner)
+    parts = [p.strip() for p in _PUNCT_RE.split(inner) if p.strip()]
+    kept: list[str] = []
+    for p in parts:
+        if p in REGION_PREFIXES or p in _BRACKET_NOISE_WORDS:
+            continue
+        if p != "社区" and len(p) <= 5 and p.endswith(("区", "县", "镇", "新区", "园区", "基地", "大厦")):
+            continue
+        cleaned = _TITLE_BRACKET_SUFFIX_NOISE_RE.sub("", p).strip()
+        if not cleaned or cleaned in REGION_PREFIXES or cleaned in _BRACKET_NOISE_WORDS:
+            continue
+        if cleaned != "社区" and len(cleaned) <= 5 and cleaned.endswith(("区", "县", "镇", "新区", "园区", "基地")):
+            continue
+        kept.append(cleaned)
+    return (" " + " ".join(kept) + " ") if kept else " "
+
+
 def normalize_title(raw: str) -> str:
-    """岗位名称归一化。"""
+    """岗位名称归一化（保留括号内核心业务方向与技术栈限定词，防同公司不同赛道岗位误判重）。"""
     if not raw:
         return ""
     text = raw.strip().lower()
-    without_brackets = _BRACKET_RE.sub(" ", text).strip()
-    if without_brackets:
-        text = without_brackets
+    text = _BRACKET_RE.sub(_clean_title_bracket_content, text).strip()
     text = _TITLE_NOISE_RE.sub(" ", text)
     text = _PUNCT_RE.sub("", text)
     return text
+
+
+def _extract_title_specialization(raw_title: str) -> tuple[str, str]:
+    """拆分岗位名的 (专业方向限定词 spec, 通用职能族 role_family)，用于识别同职能不同细分赛道（如 Go vs Java、AI vs 电商）。"""
+    if not raw_title:
+        return ("", "")
+    # 先单独提取括号内的方向词（如“高级产品经理（AI方向）”中的“ai”）
+    bracket_specs: list[str] = []
+    for m in _BRACKET_RE.finditer(raw_title):
+        cleaned_b = _PUNCT_RE.sub("", _clean_title_bracket_content(m)).strip()
+        if cleaned_b:
+            bracket_specs.append(cleaned_b)
+    base = _BRACKET_RE.sub(" ", raw_title.strip().lower())
+    base = _TITLE_NOISE_RE.sub(" ", base)
+    base = _PUNCT_RE.sub("", base)
+    base_no_rank = _TITLE_RANK_RE.sub("", base)
+    role_match = _TITLE_GENERIC_ROLE_RE.search(base_no_rank)
+    role_family = role_match.group(0) if role_match else ""
+    stem_spec = base_no_rank[: role_match.start()] if role_match else base_no_rank
+    stem_spec = _TITLE_BRACKET_SUFFIX_NOISE_RE.sub("", stem_spec).strip()
+    combined_spec = "".join([stem_spec] + [b for b in bracket_specs if b not in stem_spec])
+    return (combined_spec, role_family)
 
 
 def _title_features(norm_title: str) -> set[str]:
@@ -423,13 +621,33 @@ def _title_features(norm_title: str) -> set[str]:
 
 
 def title_similarity(title_a: str, title_b: str) -> float:
-    """计算两个岗位名的相似度（0.0 ~ 1.0）。"""
+    """计算两个岗位名的相似度（0.0 ~ 1.0），区分同职能下不同专业方向/技术栈（防误杀同大厂异方向岗）。"""
     na = normalize_title(title_a)
     nb = normalize_title(title_b)
     if not na or not nb:
         return 0.0
     if na == nb:
         return 1.0
+
+    spec_a, role_a = _extract_title_specialization(title_a)
+    spec_b, role_b = _extract_title_specialization(title_b)
+    if spec_a and spec_b:
+        if spec_a == spec_b:
+            return 0.92 if (not role_a or not role_b or role_a == role_b or role_a in role_b or role_b in role_a) else 0.5
+        fa_s = _title_features(spec_a)
+        fb_s = _title_features(spec_b)
+        spec_inter = fa_s & fb_s
+        if not spec_inter and spec_a not in spec_b and spec_b not in spec_a:
+            # 两个岗位均明确标注了不同细分方向/语言（如 AI vs 电商交易、Go vs Java），绝不当作同一岗位误杀
+            return 0.32
+        if (spec_a in spec_b or spec_b in spec_a) and (
+            not role_a or not role_b or role_a == role_b or role_a in role_b or role_b in role_a
+        ):
+            return 0.82
+    elif bool(spec_a) != bool(spec_b) and role_a and role_b and (role_a == role_b or role_a in role_b or role_b in role_a):
+        # 一个是无修饰泛称（如“产品经理”），另一个有明确专业方向（如“AI产品经理”），避免泛称子串拉高至 0.82 误杀细分岗
+        return 0.48
+
     short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
     if len(short) >= 3 and short in long_:
         return round(max(0.82, len(short) / len(long_)), 3)
@@ -465,31 +683,104 @@ def deduplicate_company_list(items: Iterable[str] | str) -> list[str]:
     return result
 
 
+def _strip_company_narrative_prefix(raw_match: str) -> str:
+    cleaned = (raw_match or "").strip()
+    if not cleaned:
+        return ""
+    stripped = _COMPANY_LEADING_NARRATIVE_RE.sub("", cleaned).strip()
+    # 剥离单字前导介词（如“在深圳观麦科技有限公司”“于杭州远山数字科技有限公司”）
+    if len(stripped) >= 5 and stripped[0] in ("在", "于", "自", "去", "到", "进", "入"):
+        stripped = stripped[1:].strip()
+    return stripped if len(stripped) >= 4 else cleaned
+
+
 def extract_employers_from_text(text: str) -> list[str]:
-    """从简历纯文本或 Markdown 中启发式识别工商主体名与显式标记的雇主名。"""
+    """从简历纯文本或 Markdown 中启发式识别工商主体名（剥离时间/任职动词前缀并排除甲乙方合作描述）及显式标记雇主名。"""
     if not text:
         return []
-    found = list(_COMPANY_EXTRACT_RE.findall(text))
-    for item in _LABELED_EMPLOYER_RE.findall(text):
-        cleaned = item.strip()
+    sanitized_text = _PARTNER_COMPANY_CLAUSE_RE.sub(" ", text)
+    found: list[str] = []
+    for raw_item in _COMPANY_EXTRACT_RE.findall(sanitized_text):
+        cleaned_emp = _strip_company_narrative_prefix(raw_item)
+        if len(cleaned_emp) >= 4:
+            found.append(cleaned_emp)
+    for item in _LABELED_EMPLOYER_RE.findall(sanitized_text):
+        cleaned = _strip_company_narrative_prefix(item.strip())
         if len(cleaned) >= 2:
             found.append(cleaned)
     return deduplicate_company_list(found)
 
 
+def _extract_docx_text(raw_bytes: bytes) -> str:
+    """使用标准库 zipfile + ElementTree 提取 Word (.docx) 简历正文段落。"""
+    import io
+
+    with zipfile.ZipFile(io.BytesIO(raw_bytes), "r") as zf:
+        xml_names = [n for n in ("word/document.xml", "word/header1.xml", "word/footer1.xml") if n in zf.namelist()]
+        paragraphs: list[str] = []
+        for name in xml_names:
+            root = ET.fromstring(zf.read(name))
+            for elem in root.iter():
+                tag = elem.tag.rsplit("}", 1)[-1]
+                if tag == "p":
+                    texts = [
+                        node.text
+                        for node in elem.iter()
+                        if node.tag.rsplit("}", 1)[-1] == "t" and node.text
+                    ]
+                    if texts:
+                        paragraphs.append("".join(texts))
+        return "\n".join(paragraphs)
+
+
 def read_resume_text_best_effort(file_path: str | Path) -> dict[str, Any]:
-    """安全读取本地简历文本：支持 UTF-8 文本/Markdown，遇到 PDF 二进制文件时尝试工具提取而不抛崩溃异常。"""
+    """安全读取本地简历文本：支持 UTF-8/GB18030 文本、Word (.docx) 标准库解包，以及 PDF 提取。"""
     p = Path(file_path).expanduser().resolve()
     raw_bytes = p.read_bytes()
-    is_pdf = p.suffix.lower() == ".pdf" or raw_bytes.startswith(b"%PDF-")
-    if not is_pdf:
+    suffix = p.suffix.lower()
+
+    # 1. Word .docx（ZIP OOXML 容器）原生零依赖解析
+    if suffix == ".docx" or raw_bytes.startswith(b"PK\x03\x04"):
+        try:
+            docx_text = _extract_docx_text(raw_bytes)
+            if docx_text.strip():
+                return {
+                    "text": docx_text,
+                    "is_pdf": False,
+                    "is_docx": True,
+                    "pdf_binary_notice": False,
+                }
+        except (zipfile.BadZipFile, ET.ParseError, KeyError, OSError):
+            if suffix == ".docx":
+                return {
+                    "text": "",
+                    "is_pdf": False,
+                    "is_docx": True,
+                    "pdf_binary_notice": True,
+                }
+
+    # 2. 旧版二进制 .doc（OLE2）提示由宿主直接读取或另存为 PDF/docx
+    if suffix == ".doc" or raw_bytes.startswith(b"\xd0\xcf\x11\xe0"):
         return {
-            "text": raw_bytes.decode("utf-8", errors="replace"),
+            "text": raw_bytes.decode("utf-16-le", errors="ignore"),
+            "is_pdf": False,
+            "pdf_binary_notice": True,
+        }
+
+    # 3. 普通文本 / Markdown（兼容 UTF-8 与 Windows 常见 GB18030 编码）
+    is_pdf = suffix == ".pdf" or raw_bytes.startswith(b"%PDF-")
+    if not is_pdf:
+        try:
+            decoded_txt = raw_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded_txt = raw_bytes.decode("gb18030", errors="replace")
+        return {
+            "text": decoded_txt,
             "is_pdf": False,
             "pdf_binary_notice": False,
         }
 
-    # 优先尝试本机已安装的 pdftotext（若有）
+    # 4. PDF：优先尝试本机已安装的 pdftotext（若有）
     pdftotext_bin = shutil.which("pdftotext")
     if pdftotext_bin:
         try:

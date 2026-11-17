@@ -24,14 +24,15 @@ from .workspace import ledger_db_path, now_iso
 from .xlsx_export import write_xlsx_workbook
 
 VALID_STATUSES: tuple[str, ...] = (
-    "discovered",        # 待审阅候选（免费预览或半自动待确认）
-    "screened_skip",     # 已深筛排雷跳过
-    "opening_sent",      # 单向系统开场已送达
-    "connected",         # 双方已建联有实质回复
-    "resume_requested",  # 已发起附件简历请求待对方点同意（绝不等同于已送达！）
-    "resume_delivered",  # 确认 PDF 附件简历已送达
-    "handed_off",        # 触发约面/谈薪/超纲红线，已交回本人跟进
-    "closed_rejected",   # 不合适已礼貌收尾归档
+    "discovered",           # 待审阅候选（免费预览或半自动待确认）
+    "screened_skip",        # 已深筛排雷跳过
+    "opening_sent",         # 单向系统开场已送达
+    "connected",            # 双方已建联有实质回复
+    "resume_requested",     # 已发起附件简历请求待对方点同意（绝不等同于已送达！）
+    "resume_delivered",     # 确认 PDF 附件简历已送达
+    "handed_off",           # 触发约面/谈薪/超纲红线，已交回本人待处理
+    "interview_scheduled",  # 本人已敲定约面或进入后续面试跟进（从紧急待办队列移出）
+    "closed_rejected",      # 不合适已礼貌收尾归档
 )
 
 STATUS_LABELS: dict[str, str] = {
@@ -42,6 +43,7 @@ STATUS_LABELS: dict[str, str] = {
     "resume_requested": "待同意简历请求",
     "resume_delivered": "PDF 简历已送达",
     "handed_off": "待本人约面/决策",
+    "interview_scheduled": "已约面/跟进中",
     "closed_rejected": "不合适归档",
 }
 
@@ -51,6 +53,7 @@ ACTIVE_CHAT_STATUSES: frozenset[str] = frozenset({
     "resume_requested",
     "resume_delivered",
     "handed_off",
+    "interview_scheduled",
 })
 
 SCHEMA_SQL = """
@@ -81,6 +84,7 @@ CREATE TABLE IF NOT EXISTS jobs (
         'resume_requested',
         'resume_delivered',
         'handed_off',
+        'interview_scheduled',
         'closed_rejected'
     )),
     resume_used TEXT NOT NULL DEFAULT '',
@@ -144,7 +148,7 @@ def _milestone_updates_for_status(
     ts: str,
     existing: dict[str, Any] | None = None,
 ) -> dict[str, str | None]:
-    """按严格四态规则维护里程碑时间戳，绝不将 resume_requested 混同为 resume_delivered。"""
+    """按严格四态规则维护里程碑时间戳，并在误标状态往回修正时清理超前时间戳（防止误扣当日配额或虚增简历送达数）。"""
     prev = existing or {}
     milestones = {
         "opening_sent_at": prev.get("opening_sent_at"),
@@ -154,22 +158,61 @@ def _milestone_updates_for_status(
         "handed_off_at": prev.get("handed_off_at"),
         "closed_at": prev.get("closed_at"),
     }
+    if status == "discovered":
+        return {
+            "opening_sent_at": None,
+            "connected_at": None,
+            "resume_requested_at": None,
+            "resume_delivered_at": None,
+            "handed_off_at": None,
+            "closed_at": None,
+        }
+    if status == "screened_skip":
+        # 若此前已在招聘平台真实发出过开场打招呼（opening_sent_at 非空），保留时间戳以防重置当日平台配额计数
+        return {
+            "opening_sent_at": milestones["opening_sent_at"],
+            "connected_at": None,
+            "resume_requested_at": None,
+            "resume_delivered_at": None,
+            "handed_off_at": None,
+            "closed_at": ts,
+        }
     if status == "opening_sent":
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
+        milestones["connected_at"] = None
+        milestones["resume_requested_at"] = None
+        milestones["resume_delivered_at"] = None
+        milestones["handed_off_at"] = None
+        milestones["closed_at"] = None
     elif status == "connected":
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
         milestones["connected_at"] = milestones["connected_at"] or ts
+        milestones["resume_requested_at"] = None
+        milestones["resume_delivered_at"] = None
+        milestones["handed_off_at"] = None
+        milestones["closed_at"] = None
     elif status == "resume_requested":
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
         milestones["connected_at"] = milestones["connected_at"] or ts
         milestones["resume_requested_at"] = milestones["resume_requested_at"] or ts
-        # 严格规则：仅发起请求绝不自动写入 resume_delivered_at！
+        # 严格规则：仅发起请求或从误标状态回退时，绝不保留 resume_delivered_at！
+        milestones["resume_delivered_at"] = None
+        milestones["handed_off_at"] = None
+        milestones["closed_at"] = None
     elif status == "resume_delivered":
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
         milestones["connected_at"] = milestones["connected_at"] or ts
         milestones["resume_delivered_at"] = milestones["resume_delivered_at"] or ts
+        milestones["handed_off_at"] = None
+        milestones["closed_at"] = None
     elif status == "handed_off":
         milestones["handed_off_at"] = milestones["handed_off_at"] or ts
+        milestones["closed_at"] = None
+    elif status == "interview_scheduled":
+        milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
+        milestones["connected_at"] = milestones["connected_at"] or ts
+        milestones["handed_off_at"] = milestones["handed_off_at"] or ts
+        milestones["closed_at"] = None
     elif status == "closed_rejected":
         milestones["closed_at"] = milestones["closed_at"] or ts
     return milestones
@@ -199,8 +242,69 @@ class JobLedger:
         return conn
 
     def _ensure_schema(self) -> None:
-        with self._connect() as conn:
-            conn.executescript(SCHEMA_SQL)
+        import shutil as _shutil
+
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.db_path, timeout=15.0, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA busy_timeout=15000;")
+            try:
+                conn.execute("PRAGMA journal_mode=WAL;")
+            except sqlite3.OperationalError:
+                pass
+
+            conn.execute("BEGIN IMMEDIATE;")
+            try:
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+                ).fetchone()
+                if row and row["sql"] and "interview_scheduled" not in str(row["sql"]):
+                    try:
+                        _shutil.copy2(self.db_path, self.db_path.with_suffix(".sqlite3.pre_mig_bak"))
+                    except OSError:
+                        pass
+                    conn.execute("DROP TABLE IF EXISTS jobs_v2")
+                    create_v2_sql = (
+                        SCHEMA_SQL.replace("CREATE TABLE IF NOT EXISTS jobs", "CREATE TABLE jobs_v2")
+                        .split("CREATE INDEX")[0]
+                        .strip()
+                    )
+                    conn.execute(create_v2_sql)
+                    old_cols = {
+                        str(r["name"]) for r in conn.execute("PRAGMA table_info(jobs)").fetchall()
+                    }
+                    v2_cols = [
+                        str(r["name"]) for r in conn.execute("PRAGMA table_info(jobs_v2)").fetchall()
+                    ]
+                    common_cols = [c for c in v2_cols if c in old_cols]
+                    select_exprs: list[str] = list(common_cols)
+                    insert_cols: list[str] = list(common_cols)
+                    if "company_clean" not in old_cols and "company" in old_cols:
+                        insert_cols.append("company_clean")
+                        select_exprs.append("company")
+                    if "company_core" not in old_cols:
+                        insert_cols.append("company_core")
+                        select_exprs.append("company_norm" if "company_norm" in old_cols else "company")
+                    col_csv = ", ".join(insert_cols)
+                    sel_csv = ", ".join(select_exprs)
+                    conn.execute(f"INSERT INTO jobs_v2 ({col_csv}) SELECT {sel_csv} FROM jobs")
+                    conn.execute("DROP TABLE jobs")
+                    conn.execute("ALTER TABLE jobs_v2 RENAME TO jobs")
+
+                for stmt in SCHEMA_SQL.split(";"):
+                    s = stmt.strip()
+                    if s:
+                        conn.execute(s)
+                conn.execute("COMMIT;")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK;")
+                except sqlite3.Error:
+                    pass
+                raise
+        finally:
+            conn.close()
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
@@ -338,22 +442,89 @@ class JobLedger:
                 )
         updated = self.get_job(job_id)
         assert updated is not None
-        return {"ok": True, "created": existing is None, "job": updated}
+        out_res: dict[str, Any] = {"ok": True, "created": existing is None, "job": updated}
+        if (
+            status == "handed_off"
+            and (not existing or existing["status"] != "handed_off")
+            and bool(payload.get("notify_desktop", True))
+        ):
+            out_res["desktop_notification"] = send_handoff_notification(
+                company=str(updated.get("company") or ""),
+                title=str(updated.get("title") or ""),
+                reason=str(updated.get("note") or ""),
+            )
+        return out_res
 
     def transition(
         self,
         *,
-        job_id: str,
+        job_id: str = "",
         to_status: str,
+        company: str | None = None,
+        title: str | None = None,
+        channel: str = "inbound",
         note: str | None = None,
         resume_used: str | None = None,
         timestamp: str | None = None,
         notify_desktop: bool = True,
     ) -> dict[str, Any]:
         target_status = _validate_status(to_status)
-        existing = self.get_job(job_id)
+        clean_id = (job_id or "").strip()
+        existing = self.get_job(clean_id) if clean_id else None
+
+        if not existing and company and company.strip():
+            # 被动来信或跨轮次跟进兜底：按公司（及可选岗位名）匹配最近活跃记录；若完全未建档则自动创建并触发通知
+            comp_q = company.strip()
+            title_q = (title or "").strip()
+            candidates = [
+                r for r in self.list_jobs(limit=500) if companies_match(str(r.get("company") or ""), comp_q)
+            ]
+            if candidates:
+                if title_q:
+                    best = max(candidates, key=lambda r: title_similarity(str(r.get("title") or ""), title_q))
+                    if title_similarity(str(best.get("title") or ""), title_q) >= 0.50:
+                        existing = best
+                elif len(candidates) == 1:
+                    existing = candidates[0]
+                else:
+                    active_cands = [r for r in candidates if r.get("status") not in ("screened_skip", "closed_rejected")]
+                    if len(active_cands) == 1:
+                        existing = active_cands[0]
+            if existing:
+                clean_id = str(existing["job_id"])
+            else:
+                up_payload: dict[str, Any] = {
+                    "company": comp_q,
+                    "title": title_q or "招聘方沟通岗位",
+                    "channel": channel or "inbound",
+                    "status": target_status,
+                    "note": note or "",
+                    "resume_used": resume_used or "",
+                    "notify_desktop": notify_desktop,
+                }
+                if clean_id:
+                    up_payload["job_id"] = clean_id
+                if timestamp:
+                    up_payload["timestamp"] = timestamp
+                up_res = self.upsert_job(up_payload)
+                return {
+                    "ok": True,
+                    "auto_created": True,
+                    "from_status": None,
+                    "to_status": target_status,
+                    "job": up_res["job"],
+                    **(
+                        {"desktop_notification": up_res["desktop_notification"]}
+                        if "desktop_notification" in up_res
+                        else {}
+                    ),
+                }
+
         if not existing:
-            raise KeyError(f"未找到 job_id={job_id!r} 的岗位记录")
+            raise KeyError(
+                f"未找到 job_id={job_id!r} 的岗位记录（处理新会话可传入 --company 与 --title 自动匹配或建档）"
+            )
+        job_id = clean_id
 
         ts = timestamp or now_iso()
         milestones = _milestone_updates_for_status(target_status, ts, existing)
@@ -448,6 +619,7 @@ class JobLedger:
                     "blocked_employer": is_former,
                     "blocked_company_hit": blk,
                     "normalized_company": core_c,
+                    "company_clean": clean_name_or_core(clean_c, core_c),
                     "normalized_title": norm_t,
                     "same_company_active": False,
                     "same_company_skipped": False,
@@ -465,6 +637,7 @@ class JobLedger:
                 "blocked_employer": False,
                 "blocked_company_hit": None,
                 "normalized_company": core_c,
+                "company_clean": clean_name_or_core(clean_c, core_c),
                 "normalized_title": norm_t,
                 "same_company_active": True,
                 "same_company_skipped": False,
@@ -506,7 +679,8 @@ class JobLedger:
                 sanitized_meta = _NEGATED_OUTSOURCING_RE.sub(" ", raw_meta)
                 if any(hint in sanitized_meta for hint in company_block_hints):
                     company_level_skipped = True
-            if sim >= 0.55:
+            sim_threshold = 0.68 if st == "screened_skip" else 0.55
+            if sim >= sim_threshold:
                 exact_or_similar_role = True
                 if recruiter and row["recruiter_name"] and recruiter.strip() != row["recruiter_name"].strip():
                     recruiter_changed_repost = True
@@ -601,13 +775,13 @@ class JobLedger:
             by_status[st] = by_status.get(st, 0) + 1
 
             has_opening = bool(row["opening_sent_at"]) or st in (
-                "opening_sent", "connected", "resume_requested", "resume_delivered", "handed_off"
+                "opening_sent", "connected", "resume_requested", "resume_delivered", "handed_off", "interview_scheduled"
             )
             if has_opening:
                 opening_delivered_total += 1
 
             has_connected = bool(row["connected_at"]) or st in (
-                "connected", "resume_requested", "resume_delivered", "handed_off"
+                "connected", "resume_requested", "resume_delivered", "handed_off", "interview_scheduled"
             )
             if has_connected:
                 connected_total += 1
@@ -636,6 +810,7 @@ class JobLedger:
                 "resume_requested_pending": by_status["resume_requested"],
                 "pdf_delivered_total": pdf_delivered_total,
                 "handed_off_pending": by_status["handed_off"],
+                "interview_scheduled": by_status["interview_scheduled"],
                 "closed_rejected": by_status["closed_rejected"],
             },
             "today_date": today_prefix,

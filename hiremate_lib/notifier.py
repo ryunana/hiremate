@@ -10,8 +10,8 @@ from typing import Any
 
 
 def _escape_applescript(text: str) -> str:
-    cleaned = (text or "").replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
-    return cleaned[:160]
+    sliced = (text or "").replace("\n", " ").replace("\r", " ")[:160]
+    return sliced.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def send_handoff_notification(
@@ -58,7 +58,7 @@ def send_handoff_notification(
                 "$n.Visible = $true; "
                 "$n.ShowBalloonTip(4000, $env:HM_NOTIFY_TITLE, $env:HM_NOTIFY_BODY, "
                 "[System.Windows.Forms.ToolTipIcon]::Info); "
-                "Start-Sleep -Milliseconds 800; $n.Dispose()"
+                "Start-Sleep -Milliseconds 2500; $n.Dispose()"
             )
             env = {
                 **os.environ,
@@ -70,7 +70,7 @@ def send_handoff_notification(
                 env=env,
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=6,
             )
             return {"sent": proc.returncode == 0, "channel": "windows_balloon"}
     except (OSError, subprocess.SubprocessError):

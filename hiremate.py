@@ -37,7 +37,7 @@ OPEN_ROOT = Path(__file__).resolve().parent
 if str(OPEN_ROOT) not in sys.path:
     sys.path.insert(0, str(OPEN_ROOT))
 
-from hiremate_lib import client, dashboard, ledger, workspace  # noqa: E402
+from hiremate_lib import __version__, client, dashboard, ledger, workspace  # noqa: E402
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -64,11 +64,50 @@ def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _resolve_live_tier_and_creds(
+    ws: Path,
+    home: Path,
+    api_base_override: str | None = None,
+) -> tuple[str, dict[str, Any] | None]:
+    """读取本机登录态；若已绑定设备但本地缓存仍为 free，主动向云端刷新一次，防止用户刚付完 ¥69 后被旧缓存误拦。"""
+    creds = client.load_credentials(home)
+    if creds and creds.get("token") and creds.get("tier") != "pro":
+        try:
+            client.auth_status(workspace=ws, home=home, api_base_override=api_base_override)
+            creds = client.load_credentials(home)
+        except Exception:
+            pass
+    tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
+    return tier, creds
+
+
+def _maybe_refresh_pro_dashboard(ws: Path, auth_res: dict[str, Any]) -> None:
+    """当 Pro 账户绑定或校验生效且本机已初始化工作区时，自动将 dashboard.html 刷新为 Pro 视图。"""
+    if not (auth_res.get("ok") and auth_res.get("active") and workspace.config_path(ws).is_file()):
+        return
+    try:
+        dash = dashboard.build_dashboard_file(
+            workspace=ws,
+            tier="pro",
+            pro_meta={
+                "email": auth_res.get("email"),
+                "lifetime": bool(auth_res.get("lifetime", auth_res.get("days_left") is None)),
+                "days_left": auth_res.get("days_left"),
+                "expires_at": auth_res.get("expires_at"),
+            },
+        )
+        auth_res["dashboard_refreshed"] = True
+        auth_res["dashboard_path"] = dash.get("out_path")
+    except Exception:
+        pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hiremate",
         description="求职助手（hiremate）原子 CLI：档案管理、四态账本、查重、静态看板与 Pro 云端接口。",
     )
+    parser.add_argument("--version", action="version", version=f"hiremate {__version__}")
     parser.add_argument("--workspace", help="工作区数据目录（默认 ~/.hiremate/default）")
     parser.add_argument("--home", help="全局凭证目录（默认 ~/.hiremate）")
     parser.add_argument("--api-base", help="覆盖云端服务地址")
@@ -80,9 +119,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="初始化求职工作区、偏好配置与空白个人事实档案")
     p_init.add_argument("--account-name", help="BOSS 直聘右上角显示的本人账号名")
     p_init.add_argument("--employers", help="历史/当前就职公司（逗号分隔，自动填入屏蔽黑名单防误投前东家）")
+    p_init.add_argument("--blocked-companies", help="额外想拉黑屏蔽的企业（逗号分隔）")
+    p_init.add_argument("--exclude-keywords", help="岗位或职责排除关键词（逗号分隔，如电销,催收,保险）")
     p_init.add_argument("--roles", help="目标岗位方向关键词（逗号分隔）")
     p_init.add_argument("--cities", help="优先城市（逗号分隔）")
+    p_init.add_argument(
+        "--remote-bigtech-flex",
+        choices=("true", "false"),
+        help="异地知名大厂弹性开关（默认 true=异地大厂可先聊，false=严格仅限所选城市）",
+    )
     p_init.add_argument("--min-salary-k", type=int, help="期望最低月薪（单位 K）")
+    p_init.add_argument(
+        "--salary-panel-tolerance",
+        choices=("true", "false"),
+        help="面板标薪容忍度开关（默认 true=容忍面板标薪略低约20%%先聊，false=严格卡死底薪）",
+    )
+    p_init.add_argument("--headhunter-policy", choices=workspace.VALID_HEADHUNTER_POLICIES, help="猎头策略：block_all / inbound_only（默认）/ allow_all")
+    p_init.add_argument("--inbound-resume-policy", choices=("generous", "strict"), help="被动索要简历策略：generous（默认尽量给）/ strict（仅高匹配给）")
     p_init.add_argument(
         "--filter-outsourcing",
         choices=("true", "false"),
@@ -154,7 +207,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_cfg_set.add_argument("--mode-reply", choices=("semi", "auto"), help="消息回复档位：semi=半自动确认，auto=全自动跟进")
     p_cfg_set.add_argument("--roles", help="目标岗位关键词（逗号分隔）")
     p_cfg_set.add_argument("--cities", help="优先城市（逗号分隔）")
+    p_cfg_set.add_argument(
+        "--remote-bigtech-flex",
+        choices=("true", "false"),
+        help="异地知名大厂弹性（true=允许异地大厂先聊，false=严格仅限所选城市）",
+    )
     p_cfg_set.add_argument("--min-salary-k", type=int, help="期望最低月薪 K")
+    p_cfg_set.add_argument(
+        "--salary-panel-tolerance",
+        choices=("true", "false"),
+        help="面板标薪容忍度（true=容忍标薪略低先聊，false=严格卡线）",
+    )
+    p_cfg_set.add_argument("--blocked-companies", help="设置额外屏蔽企业列表（逗号分隔，前东家仍自动保留保护）")
+    p_cfg_set.add_argument("--exclude-keywords", help="设置岗位排除关键词列表（逗号分隔）")
     p_cfg_set.add_argument("--headhunter-policy", choices=workspace.VALID_HEADHUNTER_POLICIES)
     p_cfg_set.add_argument(
         "--filter-outsourcing",
@@ -231,8 +296,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_up = led_sub.add_parser("upsert-job", help="新增或更新一条岗位记录")
     p_up.add_argument("--job-json", required=True, help="岗位 JSON 字符串或 @文件路径")
 
-    p_tr = led_sub.add_parser("transition", help="流转岗位四态（严格区分开场送达/建联/简历请求/简历送达/转人工）")
-    p_tr.add_argument("--job-id", required=True)
+    p_tr = led_sub.add_parser("transition", help="流转岗位四态（支持 --job-id 精确流转，或传 --company/--title 自动定位/建档）")
+    p_tr.add_argument("--job-id", default="", help="岗位记录 ID（若为新被动会话未知 ID，可改传 --company 与 --title）")
+    p_tr.add_argument("--company", help="公司名称（未传或找不到 --job-id 时用于自动定位或补建账本记录）")
+    p_tr.add_argument("--title", help="岗位名称（配合 --company 使用）")
+    p_tr.add_argument("--channel", default="inbound", choices=("outbound", "inbound"), help="自动补建记录时的来源渠道")
     p_tr.add_argument("--status", required=True, choices=ledger.VALID_STATUSES)
     p_tr.add_argument("--note", help="状态变更备注")
     p_tr.add_argument("--resume-used", help="本次实际投递或请求的简历文件名")
@@ -260,7 +328,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--no-wait", action="store_true", help="立即返回配对码与链接，不阻塞等待（适合斜杠命令）")
     p_login.add_argument("--no-browser", action="store_true", help="仅输出配对链接，不自动拉起系统浏览器")
 
-    p_upgrade = auth_sub.add_parser("upgrade", help="打开官网账户中心在线买断解锁 Pro（¥39.9 自动秒级直充账户）")
+    p_upgrade = auth_sub.add_parser("upgrade", help="打开官网账户中心在线买断解锁 Pro（特惠 ¥69 自动秒级直充账户）")
     p_upgrade.add_argument(
         "--plan",
         default="pro_buyout",
@@ -331,19 +399,24 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "init":
-            creds = client.load_credentials(home)
-            tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
+            tier, _creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
             res = workspace.init_workspace(
                 ws,
                 account_name=args.account_name,
                 employers=_split_csv(args.employers) or None,
+                blocked_companies=_split_csv(args.blocked_companies) or None,
+                exclude_keywords=_split_csv(args.exclude_keywords) or None,
                 target_roles=_split_csv(args.roles) or None,
                 preferred_cities=_split_csv(args.cities) or None,
+                remote_bigtech_flex=(args.remote_bigtech_flex == "true") if args.remote_bigtech_flex else None,
                 min_salary_k=args.min_salary_k,
+                salary_panel_tolerance=(args.salary_panel_tolerance == "true") if args.salary_panel_tolerance else None,
                 filter_outsourcing=(args.filter_outsourcing == "true") if args.filter_outsourcing else None,
                 outsourcing_policy=args.outsourcing_policy,
                 filter_onsite=(args.filter_onsite == "true") if args.filter_onsite else None,
                 onsite_policy=args.onsite_policy,
+                headhunter_policy=args.headhunter_policy,
+                inbound_resume_policy=args.inbound_resume_policy,
                 execution_mode=args.execution_mode,
                 browser_provider=args.browser_provider,
                 resume_source=args.resume_source,
@@ -356,8 +429,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.cmd == "checklist":
             cfg = workspace.load_config(ws)
-            creds = client.load_credentials(home)
-            tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
+            tier, creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
             email = str(creds.get("email") or "") if creds else None
             b_cap = None if args.browser_capable is None else (args.browser_capable == "true")
             b_hp = None if args.builtin_headed_persistent is None else (args.builtin_headed_persistent == "true")
@@ -379,8 +451,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.cfg_cmd == "show":
                 cfg = workspace.load_config(ws)
                 ob = workspace.inspect_onboarding_status(ws, cfg)
-                creds = client.load_credentials(home)
-                tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
+                tier, _creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
                 show_payload: dict[str, Any] = {
                     "ok": True,
                     "workspace": str(ws),
@@ -400,6 +471,7 @@ def main(argv: list[str] | None = None) -> int:
                     "config_file": str(workspace.config_path(ws)),
                     "profile_facts_file": str(workspace.profile_facts_path(ws)),
                     "config": cfg,
+                    "strategy_confirmation": workspace.build_strategy_confirmation_summary(cfg, tier=tier),
                 }
                 if ob["onboarding_completed"]:
                     show_payload["post_onboarding_guide"] = workspace.build_post_onboarding_guide(
@@ -428,8 +500,16 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["target_roles"] = _split_csv(args.roles)
                 if args.cities is not None:
                     cli_patch["preferred_cities"] = _split_csv(args.cities)
+                if args.remote_bigtech_flex:
+                    cli_patch["remote_bigtech_flex"] = args.remote_bigtech_flex == "true"
                 if args.min_salary_k is not None:
                     cli_patch["min_salary_k"] = args.min_salary_k
+                if args.salary_panel_tolerance:
+                    cli_patch["salary_panel_tolerance"] = args.salary_panel_tolerance == "true"
+                if args.blocked_companies is not None:
+                    cli_patch["blocked_companies"] = _split_csv(args.blocked_companies)
+                if args.exclude_keywords is not None:
+                    cli_patch["exclude_keywords"] = _split_csv(args.exclude_keywords)
                 if args.headhunter_policy:
                     cli_patch["headhunter_policy"] = args.headhunter_policy
                 if args.filter_outsourcing:
@@ -475,8 +555,8 @@ def main(argv: list[str] | None = None) -> int:
                         cfg["mode_reply"] = "semi"
                         auto_downgrade_note = "已切为副驾驶粘贴模式（copilot），档位已自动同步回半自动（semi）。"
                     else:
-                        creds = client.load_credentials(home)
-                        if not (creds and creds.get("tier") == "pro"):
+                        tier_live, creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
+                        if tier_live != "pro":
                             if explicit_wants_auto:
                                 _emit(
                                     {
@@ -512,7 +592,11 @@ def main(argv: list[str] | None = None) -> int:
                 creds_now = client.load_credentials(home)
                 tier_now = "pro" if (creds_now and creds_now.get("tier") == "pro") else "free"
                 ob_now = workspace.inspect_onboarding_status(ws, saved)
-                out_payload: dict[str, Any] = {"ok": True, "config": saved}
+                out_payload: dict[str, Any] = {
+                    "ok": True,
+                    "config": saved,
+                    "strategy_confirmation": workspace.build_strategy_confirmation_summary(saved, tier=tier_now),
+                }
                 if auto_downgrade_note:
                     out_payload["notice"] = auto_downgrade_note
                 if ob_now["onboarding_completed"] or saved.get("target_roles"):
@@ -570,10 +654,15 @@ def main(argv: list[str] | None = None) -> int:
                 _emit(led.upsert_job(job_data))
                 return 0
             if args.led_cmd == "transition":
+                if not (args.job_id or "").strip() and not (args.company or "").strip():
+                    raise ValueError("ledger transition 必须传入 --job-id，或传入 --company（及可选 --title）自动定位/建档流转")
                 _emit(
                     led.transition(
                         job_id=args.job_id,
                         to_status=args.status,
+                        company=args.company,
+                        title=args.title,
+                        channel=args.channel,
                         note=args.note,
                         resume_used=args.resume_used,
                         notify_desktop=not bool(args.no_notify),
@@ -599,15 +688,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "auth":
             if args.auth_cmd == "login":
                 wait_sec = 0 if args.no_wait else args.wait_seconds
-                _emit(
-                    client.auth_device_login(
-                        workspace=ws,
-                        home=home,
-                        api_base_override=args.api_base,
-                        wait_seconds=wait_sec,
-                        open_browser=not args.no_browser,
-                    )
+                login_res = client.auth_device_login(
+                    workspace=ws,
+                    home=home,
+                    api_base_override=args.api_base,
+                    wait_seconds=wait_sec,
+                    open_browser=not args.no_browser,
                 )
+                _maybe_refresh_pro_dashboard(ws, login_res)
+                _emit(login_res)
                 return 0
             if args.auth_cmd == "upgrade":
                 res = client.auth_open_upgrade(
@@ -630,18 +719,20 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return 0
             if args.auth_cmd == "verify-code":
-                _emit(
-                    client.auth_verify_code(
-                        email=args.email,
-                        code=args.code,
-                        workspace=ws,
-                        home=home,
-                        api_base_override=args.api_base,
-                    )
+                vc_res = client.auth_verify_code(
+                    email=args.email,
+                    code=args.code,
+                    workspace=ws,
+                    home=home,
+                    api_base_override=args.api_base,
                 )
+                _maybe_refresh_pro_dashboard(ws, vc_res)
+                _emit(vc_res)
                 return 0
             if args.auth_cmd == "status":
-                _emit(client.auth_status(workspace=ws, home=home, api_base_override=args.api_base))
+                st_res = client.auth_status(workspace=ws, home=home, api_base_override=args.api_base)
+                _maybe_refresh_pro_dashboard(ws, st_res)
+                _emit(st_res)
                 return 0
             if args.auth_cmd == "devices":
                 res = client.auth_devices(
@@ -720,8 +811,8 @@ def main(argv: list[str] | None = None) -> int:
             tier = args.demo_tier if args.demo else "free"
             pro_meta: dict[str, Any] = {}
             if not args.demo:
-                creds = client.load_credentials(home)
-                if creds and creds.get("tier") == "pro":
+                tier_live, creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
+                if tier_live == "pro" and creds:
                     tier = "pro"
                     pro_meta = {
                         "email": creds.get("email"),

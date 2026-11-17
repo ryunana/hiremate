@@ -205,11 +205,26 @@ def apply_config_updates(cfg: dict[str, Any], patch: dict[str, Any]) -> dict[str
 
 
 def detect_ego_lite_installed() -> bool:
-    """探测本机是否已安装并注册 ego lite 的 `ego-browser` 命令行入口。"""
+    """探测本机是否已安装并注册 ego lite 的 `ego-browser` 命令行入口（兼容 macOS/Linux/Windows）。"""
     if shutil.which("ego-browser"):
         return True
-    local_bin = Path.home() / ".local" / "bin" / "ego-browser"
-    return local_bin.is_file()
+    home_bin = Path.home() / ".local" / "bin"
+    candidates = [
+        home_bin / "ego-browser",
+        home_bin / "ego-browser.exe",
+        home_bin / "ego-browser.cmd",
+    ]
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        lad = Path(local_app_data)
+        candidates.extend(
+            [
+                lad / "ego-browser" / "ego-browser.exe",
+                lad / "Programs" / "ego lite" / "ego-browser.exe",
+                lad / "Programs" / "ego-lite" / "ego-browser.exe",
+            ]
+        )
+    return any(p.is_file() for p in candidates)
 
 
 def validate_and_normalize_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
@@ -542,7 +557,7 @@ def build_startup_checklist(
             b_summary = "自带 Browser Use 不支持有头+持久化，已直接跳过，准备安装并使用 ego lite"
             b_action = (
                 "请明确告知用户跳过自带 Browser Use 的原因（缺有头可见或持久化登录态易触发 BOSS 风控），并立即协助安装 ego lite"
-                "（macOS 可执行 ego-browser 技能内置 `install.sh`，Windows/通用引导下载 https://lite.ego.app/ 并完成首次打开引导以注册 `ego-browser` 命令），"
+                "（若本机已有 ego-browser 技能的 `scripts/install.sh` 可直接执行；新机首次安装请引导下载 https://lite.ego.app/ 完成安装与首次打开引导，操作网页前运行 `ego-browser skill` 读取当前版本使用指南），"
                 "就绪后运行 `config set --browser-provider ego_lite`（若用户明确不便安装，再切换 `--execution-mode copilot` 兜底；严禁使用无头浏览器或爬虫脚本）。"
             )
     elif builtin_headed_persistent is True:
@@ -659,17 +674,26 @@ def build_startup_checklist(
         pref_status = "ready"
         pref_icon = "✅"
         pref_summary = (
-            f"方向：{'/'.join(roles)} ｜ 城市：{'/'.join(cities) or '不限'} ｜ 底薪：{effective_cfg.get('min_salary_k', 20)}K+ ｜ "
-            f"外包：{pol_cn.get(out_pol, out_pol)} ｜ 驻场：{pol_cn.get(onsite_pol, onsite_pol)} ｜ 已拉黑前东家：{len(emps)} 家"
+            f"方向：{'/'.join(roles)} ｜ 城市：{'/'.join(cities) or '不限'}"
+            f"{'（异地大厂可谈）' if effective_cfg.get('remote_bigtech_flex', True) else '（严格限所选城市）'} ｜ "
+            f"底薪：{effective_cfg.get('min_salary_k', 20)}K+"
+            f"{'（容忍面板标薪略低）' if effective_cfg.get('salary_panel_tolerance', True) else '（严格卡线）'} ｜ "
+            f"外包：{pol_cn.get(out_pol, out_pol)} ｜ 驻场：{pol_cn.get(onsite_pol, onsite_pol)} ｜ "
+            f"猎头：{pol_cn.get(str(effective_cfg.get('headhunter_policy', 'inbound_only')), '仅接来信')} ｜ "
+            f"已拉黑前东家：{len(emps)} 家"
         )
-        pref_action = f"当前版本：{tier_cn}。"
+        pref_action = f"当前版本：{tier_cn}；上述每一项筛选策略均可随时一句话修改。"
     else:
         pref_status = "pending"
         pref_icon = "⬜"
         pref_summary = (
-            f"待确认目标岗位、城市、底薪与外包/驻场接受度（默认外包[{pol_cn.get(out_pol)}] · 驻场[{pol_cn.get(onsite_pol)}]，可独立放开）"
+            "【必经用户确认】请将全部 8 项职位筛选默认策略完整列给用户确认是否修改（严禁静默套用默认值）"
         )
-        pref_action = f"当前版本：{tier_cn}；导入简历时将自动识别全部前东家加入屏蔽名单。"
+        pref_action = (
+            f"当前版本：{tier_cn}；建档落盘前必须向用户逐项确认：目标岗位、城市+异地大厂弹性（默认开启）、"
+            f"底薪+面板标薪容忍度（默认开启）、外包策略（默认[{pol_cn.get(out_pol)}]）、驻场策略（默认[{pol_cn.get(onsite_pol)}]）、"
+            f"猎头策略（默认[仅接被动来信]）、前东家屏蔽+额外拉黑企业+排除词、被动求简历策略（默认[尽量给]）。"
+        )
 
     items = [
         {
@@ -704,11 +728,13 @@ def build_startup_checklist(
             "id": "preferences_and_tier",
             "required": True,
             "status": pref_status,
-            "title": "求职边界、前东家屏蔽与版本档位",
+            "title": "求职筛选全量策略、前东家屏蔽与版本档位",
             "summary": pref_summary,
             "action": pref_action,
         },
     ]
+
+    strat_summary = build_strategy_confirmation_summary(effective_cfg, tier=tier)
 
     md_lines = [
         "### 📋 求职助手 · 启动准备核对单（Checklist）",
@@ -718,8 +744,10 @@ def build_startup_checklist(
         f"   - {p_action}",
         f"3. {r_icon} **真实简历底座（必选）**：{r_summary}",
         f"   - {r_action}",
-        f"4. {pref_icon} **求职偏好与版本**：{pref_summary}",
+        f"4. {pref_icon} **职位筛选策略与版本（须与你确认是否修改）**：{pref_summary}",
         f"   - {pref_action}",
+        "",
+        strat_summary["markdown"],
     ]
 
     res_chk: dict[str, Any] = {
@@ -735,6 +763,7 @@ def build_startup_checklist(
         "resume_source": resume_src,
         "has_attachment_resume": ob["has_attachment_resume"],
         "items": items,
+        "strategy_confirmation": strat_summary,
         "markdown": "\n".join(md_lines),
     }
     if ob["onboarding_completed"]:
@@ -744,6 +773,200 @@ def build_startup_checklist(
             dashboard_path=str((workspace / "dashboard.html").resolve()),
         )
     return res_chk
+
+
+def build_strategy_confirmation_summary(
+    cfg: dict[str, Any],
+    *,
+    tier: str = "free",
+) -> dict[str, Any]:
+    """生成完整的 8 项职位筛选与沟通策略确认表（确保用户对所有默认开关一目了然并可当场修改，而非事后翻看板才发现）。"""
+    pol_cn = {
+        "block_all": "全部排除过滤",
+        "inbound_only": "主动搜岗不投 · 仅接被动来信",
+        "allow_all": "完全开放接受",
+    }
+    roles = "、".join(cfg.get("target_roles") or []) or "待从简历提炼确认"
+    cities_raw = "、".join(cfg.get("preferred_cities") or []) or "不限城市"
+    remote_flex = bool(cfg.get("remote_bigtech_flex", True))
+    min_k = int(cfg.get("min_salary_k", 20) or 20)
+    sal_tol = bool(cfg.get("salary_panel_tolerance", True))
+    out_pol = str(cfg.get("outsourcing_policy") or "block_all")
+    onsite_pol = str(cfg.get("onsite_policy") or "block_all")
+    hh_pol = str(cfg.get("headhunter_policy") or "inbound_only")
+    past_emps = list(cfg.get("past_employers") or [])
+    blocked_all = list(cfg.get("blocked_companies") or [])
+    extra_blocked = [c for c in blocked_all if c.lower() not in {p.lower() for p in past_emps}]
+    ex_kws = list(cfg.get("exclude_keywords") or [])
+    inb_pol = str(cfg.get("inbound_resume_policy") or "generous")
+    mode_d = str(cfg.get("mode_discover") or "semi")
+    mode_r = str(cfg.get("mode_reply") or "semi")
+
+    items = [
+        {
+            "key": "target_roles",
+            "label": "目标岗位方向",
+            "current": roles,
+            "how_to_change": "随时可增删岗位关键词（`--roles`）",
+        },
+        {
+            "key": "cities_and_remote_flex",
+            "label": "优先城市 & 异地大厂弹性",
+            "current": f"{cities_raw}（异地知名大厂可先聊：{'开启 [默认]' if remote_flex else '关闭，严格仅看所选城市'}）",
+            "how_to_change": "不想看任何异地大厂可改为关闭（`--remote-bigtech-flex false`）",
+        },
+        {
+            "key": "salary_and_tolerance",
+            "label": "期望最低月薪 & 标薪容忍度",
+            "current": f"{min_k}K+（容忍面板标薪略低约 20% 先聊：{'开启 [默认]' if sal_tol else '关闭，严格卡死底薪'}）",
+            "how_to_change": "想严格按标薪卡线可改为关闭（`--salary-panel-tolerance false`）",
+        },
+        {
+            "key": "outsourcing_policy",
+            "label": "外包 / 派遣 / OD 策略",
+            "current": pol_cn.get(out_pol, out_pol),
+            "how_to_change": "可改为「全部排除 / 仅接被动来信 / 完全开放」（`--outsourcing-policy`）",
+        },
+        {
+            "key": "onsite_policy",
+            "label": "驻场 / 客户现场外派策略",
+            "current": pol_cn.get(onsite_pol, onsite_pol),
+            "how_to_change": "可与外包独立分开设置（`--onsite-policy`）",
+        },
+        {
+            "key": "headhunter_policy",
+            "label": "猎头渠道策略",
+            "current": pol_cn.get(hh_pol, hh_pol),
+            "how_to_change": "默认主动不投猎头、仅接猎头主动来信；可改「全部屏蔽」或「全部开放」（`--headhunter-policy`）",
+        },
+        {
+            "key": "shield_and_exclude",
+            "label": "前东家保护 / 额外拉黑 / 排除词",
+            "current": (
+                f"前东家自动拉黑 {len(past_emps)} 家（{'、'.join(past_emps) or '待从简历提取'}）"
+                f" ｜ 额外拉黑企业：{'、'.join(extra_blocked) or '无'}"
+                f" ｜ 岗位排除词：{'、'.join(ex_kws) or '无'}"
+            ),
+            "how_to_change": "可追加想屏蔽的竞对公司（`--blocked-companies`）或岗位排除词如电销/客服（`--exclude-keywords`）",
+        },
+        {
+            "key": "resume_and_automation",
+            "label": "被动求简历策略 & 自动化档位",
+            "current": (
+                f"被动求简历：{'除非明显不符尽量给 [默认]' if inb_pol == 'generous' else '仅高匹配严格给付'}"
+                + (
+                    f" ｜ 档位：找岗[{'全自动' if mode_d == 'auto' else '半自动'}] · 答疑[{'全自动' if mode_r == 'auto' else '半自动'}]"
+                    if tier == "pro"
+                    else " ｜ 档位：免费版默认半自动审阅（Pro 解锁全自动找岗与消息答疑）"
+                )
+            ),
+            "how_to_change": "被动求简历可改严控（`--inbound-resume-policy strict`）"
+            + ("；Pro 找岗/答疑可随时切全自动（`--mode-discover auto --mode-reply auto`）" if tier == "pro" else ""),
+        },
+    ]
+
+    md_lines = [
+        "### ⚙️ 职位筛选与沟通策略明细（请确认是否需要修改，满意可直接默认，想改哪项直接说）：",
+        f"1. **目标岗位**：{items[0]['current']}",
+        f"2. **城市与异地弹性**：{items[1]['current']} *(不想看异地大厂可说「关闭异地弹性」)*",
+        f"3. **最低月薪与容忍度**：{items[2]['current']} *(想严格卡死标薪可说「严格卡底薪」)*",
+        f"4. **外包 / 派遣 / OD**：{items[3]['current']} *(可改「仅接来信」或「开放接受」)*",
+        f"5. **驻场 / 现场外派**：{items[4]['current']} *(可独立改「仅接来信」或「开放接受」)*",
+        f"6. **猎头渠道**：{items[5]['current']} *(可改「全部屏蔽猎头」或「主动也看猎头」)*",
+        f"7. **屏蔽企业与排除词**：{items[6]['current']} *(有想额外拉黑的公司或排除词随时补充)*",
+        f"8. **求简历与自动化档位**：{items[7]['current']}",
+    ]
+    return {
+        "tier": tier,
+        "items": items,
+        "markdown": "\n".join(md_lines),
+    }
+
+
+def build_pro_activation_guide(
+    workspace: Path,
+    cfg: dict[str, Any] | None = None,
+    *,
+    email: str | None = None,
+    validity_desc: str = "买断长期有效",
+    dashboard_path: str | None = None,
+) -> dict[str, Any]:
+    """构建 Pro 购买/绑定成功后的强制权益说明与全自动切换引导（解决绑定设备后无权益告知、不知可切全自动的问题）。"""
+    effective_cfg = cfg if cfg is not None else load_config(workspace)
+    ob = inspect_onboarding_status(workspace, effective_cfg)
+    mode_d = str(effective_cfg.get("mode_discover") or "semi")
+    mode_r = str(effective_cfg.get("mode_reply") or "semi")
+    still_semi = mode_d == "semi" or mode_r == "semi"
+    dash_file = dashboard_path or str((workspace / "dashboard.html").resolve())
+    acct_tag = f"{email} · {validity_desc}" if email else validity_desc
+
+    unlocked_benefits = [
+        "100+ 深度外包/派遣名录 + 社区实测动态排雷池（穿透公司简介识破伪装自研的驻场/OD）",
+        "解锁「全自动模式（auto）」：主动找岗破冰（mode_discover）与 HR 消息答疑（mode_reply）均可脱离逐条手动确认",
+        "去 AI 代办味真人短句答疑守卫（严格锚定本地真实履历自然接话，绝不顺着 JD 胡编）",
+        "多版本线上 PDF 附件简历自动路由（按岗位方向自动挑选最对口简历发送，四态精准拆账）",
+        "工作日白天错峰自动巡检盯盘 + 约面/谈薪/索要微信自动停手并弹本机系统通知（限本人最多 2 台电脑长期有效）",
+    ]
+
+    mode_d_cn = "全自动托管（auto）" if mode_d == "auto" else "半自动审阅（semi）"
+    mode_r_cn = "全自动跟进（auto）" if mode_r == "auto" else "半自动确认（semi）"
+
+    if not ob["onboarding_completed"]:
+        md_lines = [
+            f"### 🎉 Pro 全托管版已成功绑定本机（{acct_tag}）！",
+            "**你已解锁全部 5 项 Pro 专属高级权益**：",
+            "- ✅ **100+ 深度外包与社区动态排雷池** ｜ ✅ **找岗与消息答疑「全自动模式」** ｜ ✅ **真人短句答疑守卫** ｜ ✅ **多版 PDF 简历按岗自动路由** ｜ ✅ **工作日白天错峰自动盯盘 + 约面桌面弹窗提醒**（支持 2 台电脑通用）",
+            "",
+            "📋 **下一步（5 分钟完成建档即可开启全自动托管）**：",
+            "- 请直接把你的 **PDF/Word 简历拖进对话**（或让我去读取你的 BOSS 在线简历），我们核对完 **8 项筛选策略** 后，就能直接为你开启**全自动找岗/答疑模式**并挂上工作日自动巡检！",
+        ]
+        must_do = [
+            "1. 【严禁只说一句登录成功就停下】必须先向用户完整报喜展示上方 `unlocked_benefits` 5 项已解锁的 Pro 高级能力；",
+            "2. 紧接着在同一条回复中展示《启动准备核对单》与 8 项默认筛选策略，引导用户提供简历完成建档，并告知建完档即可一键切换全自动模式与工作日定时巡检。",
+        ]
+    else:
+        semi_notice = (
+            f"💡 **模式提醒：你当前的「主动找岗（{mode_d_cn}）」与「消息答疑（{mode_r_cn}）」仍处于免费版默认的半自动状态**——现在 Pro 已解锁**全自动模式（`auto`）**，无需再每条手动确认！"
+            if still_semi
+            else f"✅ **当前自动化档位**：主动找岗「{mode_d_cn}」 ｜ 消息答疑「{mode_r_cn}」"
+        )
+        md_lines = [
+            f"### 🎉 Pro 全托管版已激活生效（{acct_tag}）！",
+            "**已为你本机解锁 5 项 Pro 高级功能**（本地求职看板已同步升级为 Pro 视图）：",
+            "1. **100+ 深度外包名录 + 社区动态排雷池**：穿透公司主页识破伪装外包、派遣与驻场岗",
+            "2. **全自动找岗 & 全自动答疑模式解锁**：支持定额自动破冰（每轮≤5岗）与自动回复跟进",
+            "3. **真人感短句答疑守卫**：严格对照你的本地真实履历自然接话，绝不瞎编经历",
+            "4. **多版线上 PDF 简历自动路由**：手里有多份方向简历时自动按岗匹配投递",
+            "5. **工作日错峰自动盯盘 + 约面弹窗停手**：聊到约面时间/要微信/谈薪资自动停手弹窗叫你（支持 2 台电脑同时使用）",
+            "",
+            semi_notice,
+            "",
+            "**接下来想怎么开启 Pro 托管？（直接回数字即可）：**",
+            "1. **【推荐 · 省心全托管】把「主动找岗 + 消息答疑」双双切换为全自动（`auto`），并挂载工作日自动巡检** *(周一至周五 09:00–12:00、14:00–18:00 自动盯盘，开启前向你确认一次防风控护栏)*",
+            "2. **【稳妥半托管】找岗保留「半自动审阅」，仅把「消息答疑」切为全自动（`auto`）+ 开启工作日自动巡检** *(打招呼由你挑，后续追问与递简历全自动)*",
+            "3. **【先跑一轮体验】暂保持半自动，立即用 Pro 100+ 深度排雷库去 BOSS 筛一轮岗位 + 检查未读消息**",
+            f"4. **【配置多版简历路由 / 查看 Pro 看板】** *(若有 2 份以上线上附件简历，告诉我文件名与对应方向即可绑定；Pro 看板：`{dash_file}`)*",
+        ]
+        must_do = [
+            "1. 【严禁绑定后冷场停步】必须向用户完整展示已解锁的 5 项 Pro 权益，并明确指出当前「主动找岗」与「消息答疑」仍处于半自动（semi），现已可切换为全自动（auto）；",
+            "2. 必须在回复末尾展示上方 `user_reply_menu_markdown` 的 1 / 2 / 3 / 4 选择菜单；若用户回复 1 或 2 要求切 `auto`，先做简短平台风控确认提示，用户点头后带 `--ack-auto-risk` 运行 `config set` 并挂载宿主工作日定时巡检。",
+        ]
+
+    return {
+        "tier": "pro",
+        "email": email,
+        "validity": validity_desc,
+        "onboarding_completed": ob["onboarding_completed"],
+        "current_modes": {
+            "mode_discover": mode_d,
+            "mode_reply": mode_r,
+        },
+        "still_in_semi_mode": still_semi,
+        "dashboard_path": dash_file,
+        "unlocked_benefits": unlocked_benefits,
+        "agent_must_do": must_do,
+        "user_reply_menu_markdown": "\n".join(md_lines),
+    }
 
 
 def build_post_onboarding_guide(
@@ -855,7 +1078,8 @@ def build_post_onboarding_guide(
         "recommended_action": recommended_action,
         "agent_must_do": [
             "1. 若尚未将确认后的个人求职事实写入 profile_facts_path，请立即写入，并顺手运行一次 `hiremate.py build-dashboard` 生成初始静态看板；",
-            "2. 【严禁建完档停步冷场】绝不能只回复一句“建档已完成”就结束！必须在同一条回复末尾向用户清晰展示下方 `user_reply_menu_markdown` 的 1 / 2 / 3 下一步操作菜单，让用户直接回一个 `1` 就能开跑首轮实战。",
+            "2. 【职位筛选策略全透明确认】若刚才尚未向用户完整展示全部 8 项筛选策略（异地大厂弹性、面板薪资容忍度、外包/驻场/猎头三项策略、前东家与排除词、求简历策略），必须在本次回复中把 `strategy_confirmation.markdown` 列给用户过目并询问是否要修改（严禁藏在看板里让用户自己翻才发现）；",
+            "3. 【严禁建完档停步冷场】必须在同一条回复末尾向用户清晰展示下方 `user_reply_menu_markdown` 的 1 / 2 / 3 下一步操作菜单，让用户直接回一个 `1` 就能开跑首轮实战。",
         ],
         "options": options,
         "user_reply_menu_markdown": "\n".join(menu_lines),
@@ -867,13 +1091,19 @@ def init_workspace(
     *,
     account_name: str | None = None,
     employers: list[str] | None = None,
+    blocked_companies: list[str] | None = None,
+    exclude_keywords: list[str] | None = None,
     target_roles: list[str] | None = None,
     preferred_cities: list[str] | None = None,
+    remote_bigtech_flex: bool | None = None,
     min_salary_k: int | None = None,
+    salary_panel_tolerance: bool | None = None,
     filter_outsourcing: bool | None = None,
     outsourcing_policy: str | None = None,
     filter_onsite: bool | None = None,
     onsite_policy: str | None = None,
+    headhunter_policy: str | None = None,
+    inbound_resume_policy: str | None = None,
     execution_mode: str | None = None,
     browser_provider: str | None = None,
     resume_source: str | None = None,
@@ -918,6 +1148,14 @@ def init_workspace(
         cfg["account_display_name"] = account_name.strip()
     if employers:
         cfg["past_employers"] = deduplicate_company_list(list(cfg.get("past_employers", [])) + employers)
+    if blocked_companies:
+        cfg["blocked_companies"] = deduplicate_company_list(
+            list(cfg.get("blocked_companies", [])) + blocked_companies
+        )
+    if exclude_keywords:
+        cfg["exclude_keywords"] = deduplicate_company_list(
+            list(cfg.get("exclude_keywords", [])) + exclude_keywords
+        )
     if target_roles:
         cfg["target_roles"] = deduplicate_company_list(list(cfg.get("target_roles", [])) + target_roles)
     if preferred_cities:
@@ -928,6 +1166,10 @@ def init_workspace(
         cfg["min_salary_k"] = min_salary_k
 
     init_patch: dict[str, Any] = {}
+    if remote_bigtech_flex is not None:
+        init_patch["remote_bigtech_flex"] = remote_bigtech_flex
+    if salary_panel_tolerance is not None:
+        init_patch["salary_panel_tolerance"] = salary_panel_tolerance
     if filter_outsourcing is not None:
         init_patch["filter_outsourcing"] = filter_outsourcing
     if outsourcing_policy is not None:
@@ -936,6 +1178,10 @@ def init_workspace(
         init_patch["filter_onsite"] = filter_onsite
     if onsite_policy is not None:
         init_patch["onsite_policy"] = onsite_policy
+    if headhunter_policy is not None:
+        init_patch["headhunter_policy"] = headhunter_policy
+    if inbound_resume_policy is not None:
+        init_patch["inbound_resume_policy"] = inbound_resume_policy
     if execution_mode is not None:
         init_patch["execution_mode"] = execution_mode
     if browser_provider is not None:
@@ -988,6 +1234,7 @@ def init_workspace(
         "profile_preserved": profile_preserved,
         "backups": backups,
         "config": saved_cfg,
+        "strategy_confirmation": build_strategy_confirmation_summary(saved_cfg, tier=tier),
         "post_onboarding_guide": build_post_onboarding_guide(
             saved_cfg,
             tier=tier,
@@ -1027,10 +1274,15 @@ def merge_employers(
         "past_employers": saved["past_employers"],
         "blocked_companies": saved["blocked_companies"],
     }
-    if pdf_binary_notice and not cleaned_incoming:
-        result["notice"] = (
-            "检测到压缩流 PDF 简历，请由当前桌面 Agent 直接读取 PDF 内容后通过 --employers 传入全部过往雇主名称。"
+    if pdf_binary_notice:
+        result["pdf_partial_warning"] = (
+            "检测到压缩流 PDF 简历且环境未安装 pdftotext，二进制文本扫描可能漏提部分前东家；"
+            "请当前桌面 Agent 直接阅读 PDF 原文交叉核对，并通过 --employers 补齐全部过往雇主名称。"
         )
+        if not cleaned_incoming:
+            result["notice"] = (
+                "检测到压缩流 PDF 简历，请由当前桌面 Agent 直接读取 PDF 内容后通过 --employers 传入全部过往雇主名称。"
+            )
     return result
 
 

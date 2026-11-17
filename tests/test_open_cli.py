@@ -46,13 +46,21 @@ def _run_cli(args: list[str]) -> tuple[int, dict]:
 
 class TestOpenPluginAndE2E(unittest.TestCase):
     def setUp(self) -> None:
-        os.environ["HIREMATE_DISABLE_DESKTOP_NOTIFY"] = "1"
+        from unittest import mock as _mock
+
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.home = self.root / "hm_home"
         self.ws = self.root / "ws"
         self.server_data = self.root / "server_data"
         self.srv = None
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith(("STRIPE_", "XUNHUPAY_", "EPAY_"))}
+        clean_env["HIREMATE_DISABLE_DESKTOP_NOTIFY"] = "1"
+        clean_env["HIREMATE_NO_BROWSER"] = "1"
+        clean_env["HIREMATE_HOME"] = str(self.home)
+        clean_env.pop("HIREMATE_ENV", None)
+        self._env_patcher = _mock.patch.dict(os.environ, clean_env, clear=True)
+        self._env_patcher.start()
 
         if HAS_PRO_SERVER:
             empty_smtp = SmtpSettings(host="smtp.exmail.qq.com", port=465, user="", password="", sender="")
@@ -68,6 +76,7 @@ class TestOpenPluginAndE2E(unittest.TestCase):
         if self.srv is not None:
             self.srv.shutdown()
             self.srv.server_close()
+        self._env_patcher.stop()
         self.tmp.cleanup()
 
     def _base_flags(self) -> list[str]:
@@ -366,8 +375,8 @@ console.log(JSON.stringify({{ skills, commands }}));
         order = self.srv.store.create_payment_order(
             email="pair_user@example.com", plan="pro_buyout", provider="stripe", pay_channel="wechat"
         )
-        self.assertEqual(order["amount_cents"], 3990)
-        self.srv.store.complete_payment_order(order["order_no"], paid_amount_cents=3990)
+        self.assertEqual(order["amount_cents"], 6900)
+        self.srv.store.complete_payment_order(order["order_no"], paid_amount_cents=6900)
 
         rc_st, st_res = _run_cli(self._base_flags() + ["auth", "status"])
         self.assertEqual(rc_st, 0)
@@ -813,9 +822,106 @@ console.log(JSON.stringify({{ skills, commands }}));
         )
         self.assertEqual(chk_chosen_ego["browser_provider"], "ego_lite")
         self.assertEqual(chk_chosen_ego["items"][0]["status"], "ready")
+        self.assertIn("post_onboarding_guide", chk_chosen_ego)
+
+        # 退出登录验证纯免费版（Free）建档收尾引导菜单 + 免费版空看板的下一步启动卡与 Pro 购买跳转链接
+        _run_cli(flags + ["auth", "logout"])
+        _, chk_free_guide = _run_cli(
+            flags + ["checklist", "--builtin-headed-persistent", "true", "--ego-installed", "true"]
+        )
+        self.assertEqual(chk_free_guide["tier"], "free")
+        self.assertIn("跑第一轮搜岗深筛预览", chk_free_guide["post_onboarding_guide"]["user_reply_menu_markdown"])
+
         dash_ego = self.root / "ego-lite-dash.html"
-        _run_cli(flags + ["build-dashboard", "--out", str(dash_ego)])
-        self.assertIn("ego lite", dash_ego.read_text(encoding="utf-8"))
+        _, dash_empty_res = _run_cli(flags + ["build-dashboard", "--out", str(dash_ego)])
+        self.assertEqual(dash_empty_res["tier"], "free")
+        self.assertTrue(dash_empty_res.get("first_run_empty"))
+        self.assertIn("post_onboarding_guide", dash_empty_res)
+        ego_html = dash_ego.read_text(encoding="utf-8")
+        self.assertIn("ego lite", ego_html)
+        # 验证免费版看板包含直接可点击的 Pro 购买跳转链接与功能对比链接
+        self.assertIn("/activate?plan=pro_buyout#subscribe-box", ego_html)
+        self.assertIn("/#pricing", ego_html)
+        self.assertIn("¥69 立即购买解锁 Pro", ego_html)
+        # 验证 0 岗位冷启动空看板包含下一步开跑引导卡与一键复制口令
+        self.assertIn("本地求职建档已完成，选一种方式跑通第一轮", ego_html)
+        self.assertIn("复制口令开跑", ego_html)
+
+        # 7. 验证 8 项职位筛选策略全透明确认表与全参数可修改（拒绝暗箱默认）
+        self.assertIn("strategy_confirmation", chk_free_guide)
+        self.assertEqual(len(chk_free_guide["strategy_confirmation"]["items"]), 8)
+        self.assertIn("异地知名大厂可先聊", chk_free_guide["strategy_confirmation"]["markdown"])
+        self.assertIn("容忍面板标薪略低", chk_free_guide["strategy_confirmation"]["markdown"])
+
+        _, mod_strat = _run_cli(
+            flags
+            + [
+                "config",
+                "set",
+                "--remote-bigtech-flex",
+                "false",
+                "--salary-panel-tolerance",
+                "false",
+                "--blocked-companies",
+                "某竞对科技",
+                "--exclude-keywords",
+                "电销,保险",
+                "--headhunter-policy",
+                "block_all",
+                "--inbound-resume-policy",
+                "strict",
+            ]
+        )
+        self.assertTrue(mod_strat["ok"])
+        self.assertFalse(mod_strat["config"]["remote_bigtech_flex"])
+        self.assertFalse(mod_strat["config"]["salary_panel_tolerance"])
+        self.assertIn("前东家示例公司", mod_strat["config"]["blocked_companies"])
+        self.assertIn("某竞对科技", mod_strat["config"]["blocked_companies"])
+        self.assertEqual(mod_strat["config"]["exclude_keywords"], ["电销", "保险"])
+        self.assertIn("严格仅看所选城市", mod_strat["strategy_confirmation"]["markdown"])
+        self.assertIn("严格卡死底薪", mod_strat["strategy_confirmation"]["markdown"])
+
+        # 8. 验证「先以免费号登录 -> 网页付款升 Pro -> 绑定/直接切全自动」完整权益欢迎单与全自动切换引导
+        if HAS_PRO_SERVER and self.srv is not None:
+            # 8a. 先登录尚未付费的免费账号（本地缓存 tier="free"，找岗与答疑均为 semi）
+            _, f_start = _run_cli(flags + ["auth", "login", "--no-wait"])
+            self.srv.store.approve_device_auth(
+                user_code=f_start["user_code"], email="upgrade_journey@example.com"
+            )
+            _, f_bound = _run_cli(flags + ["auth", "login", "--wait-seconds", "5"])
+            self.assertEqual(f_bound["tier"], "free")
+            self.assertNotIn("pro_activation_guide", f_bound)
+
+            # 8b. 模拟用户在网页扫码完成 ¥69 买断（此时尚未手动跑 auth status）
+            self.srv.store.grant_pro(email="upgrade_journey@example.com", days=0)
+
+            # 8c. 用户跑 auth status（或重跑 auth login）：自动将本地看板刷新为 Pro 视图，输出 5 大权益并提醒当前仍为半自动可切全自动
+            _, st_pro = _run_cli(flags + ["auth", "status"])
+            self.assertEqual(st_pro["tier"], "pro")
+            self.assertTrue(st_pro.get("dashboard_refreshed"))
+            self.assertIn("pro_activation_guide", st_pro)
+            guide = st_pro["pro_activation_guide"]
+            self.assertEqual(len(guide["unlocked_benefits"]), 5)
+            self.assertTrue(guide["still_in_semi_mode"])
+            self.assertIn("全自动模式", guide["user_reply_menu_markdown"])
+            self.assertIn("仍处于免费版默认的半自动状态", guide["user_reply_menu_markdown"])
+
+            # 8d. 即使本地凭证曾被标为 free，用户刚买完直接请求开启全自动时也会实时向云端刷新放行（仅需风险确认，绝不误报未开通 Pro）
+            cred_file = Path(f_bound["credentials_path"])
+            stale_cred = json.loads(cred_file.read_text(encoding="utf-8"))
+            stale_cred["tier"] = "free"
+            cred_file.write_text(json.dumps(stale_cred, ensure_ascii=False), encoding="utf-8")
+            rc_auto, auto_confirm = _run_cli(
+                flags + ["config", "set", "--mode-discover", "auto", "--mode-reply", "auto"]
+            )
+            self.assertEqual(rc_auto, 1)
+            self.assertEqual(auto_confirm["code"], "AUTO_RISK_CONFIRMATION_REQUIRED")
+            _, auto_ok = _run_cli(
+                flags + ["config", "set", "--mode-discover", "auto", "--mode-reply", "auto", "--ack-auto-risk"]
+            )
+            self.assertTrue(auto_ok["ok"])
+            self.assertEqual(auto_ok["config"]["mode_discover"], "auto")
+            self.assertEqual(auto_ok["config"]["mode_reply"], "auto")
 
     def test_audit_hardening_employer_aliases_force_preserve_auto_confirm_and_fail_closed(self) -> None:
         from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -978,6 +1084,437 @@ console.log(JSON.stringify({{ skills, commands }}));
         self.assertTrue(un_res["data_preserved"])
         self.assertFalse((no_host_canon / "skill" / "hiremate").exists())
         self.assertTrue((no_host_canon / "default" / "profile_facts.md").is_file())
+
+    def test_product_backlog_closures_docx_dedup_privacy_ledger_and_hosts(self) -> None:
+        import sqlite3
+        import subprocess
+        import zipfile
+        from hiremate_lib import __version__, client as hm_client, ledger as hm_ledger, notifier as hm_notifier
+        from hiremate_lib.normalize import companies_match, employer_shield_match, title_similarity
+
+        # 1. --version 版本号一致性校验
+        ver_proc = subprocess.run(
+            [sys.executable, str(OPEN_ROOT / "hiremate.py"), "--version"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn(__version__, ver_proc.stdout.strip())
+
+        # 2. 括号内细分方向/语言栈保留 & check-dup 对历史 screened_skip 的精准放行
+        self.assertLess(title_similarity("高级产品经理（AI方向）", "高级产品经理（电商交易）"), 0.55)
+        self.assertLess(title_similarity("后端开发工程师（Go）", "后端开发工程师（Java）"), 0.55)
+        self.assertGreater(title_similarity("高级AI产品经理（急聘/双休）", "AI产品经理"), 0.85)
+
+        ws3 = self.root / "ws_backlog"
+        home3 = self.root / "home_backlog"
+        flags = ["--home", str(home3), "--workspace", str(ws3), "--api-base", "http://127.0.0.1:9"]
+        _run_cli(flags + ["init", "--account-name", "林远", "--employers", "北京字跳网络技术有限公司", "--roles", "AI产品经理"])
+
+        # 曾跳过“同公司但方向不符”的岗位后，后续遇到同公司真正对口的细分方向绝不误判重复
+        _run_cli(
+            flags
+            + [
+                "ledger",
+                "upsert-job",
+                "--job-json",
+                json.dumps(
+                    {
+                        "company": "快手",
+                        "title": "高级产品经理（电商交易）",
+                        "recruiter": "王女士",
+                        "status": "screened_skip",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        _, dup_diff_track = _run_cli(
+            flags + ["ledger", "check-dup", "--company", "快手", "--title", "高级产品经理（AI方向）", "--recruiter", "李先生"]
+        )
+        self.assertFalse(dup_diff_track["duplicate"])
+        self.assertFalse(dup_diff_track["same_company_active"])
+
+        # 但同一细分岗位换个 HR 重发时仍准确拦截重复
+        _, dup_same_track = _run_cli(
+            flags + ["ledger", "check-dup", "--company", "快手", "--title", "高级产品经理（电商交易）", "--recruiter", "赵先生"]
+        )
+        self.assertTrue(dup_same_track["duplicate"])
+
+        # 曾跳过宽泛“产品经理”后，遇到“AI产品经理”不误杀
+        _run_cli(
+            flags
+            + [
+                "ledger",
+                "upsert-job",
+                "--job-json",
+                json.dumps({"company": "小红书", "title": "产品经理", "status": "screened_skip"}, ensure_ascii=False),
+            ]
+        )
+        _, dup_broad_vs_ai = _run_cli(
+            flags + ["ledger", "check-dup", "--company", "小红书", "--title", "AI产品经理"]
+        )
+        self.assertFalse(dup_broad_vs_ai["duplicate"])
+
+        # 3. 集团工商别名扩充、2字核心词+英文后缀前东家拦截、companies_match 跨主体同公司识别
+        self.assertTrue(employer_shield_match("字节跳动", "北京字跳网络技术有限公司"))
+        self.assertTrue(employer_shield_match("哔哩哔哩", "上海宽娱数码科技有限公司"))
+        self.assertTrue(employer_shield_match("BOSS直聘", "北京华品博睿网络技术有限公司"))
+        self.assertTrue(employer_shield_match("元象XVERSE", "深圳元象信息科技有限公司"))
+        self.assertTrue(employer_shield_match("平安科技", "中国平安保险（集团）股份有限公司"))
+        self.assertTrue(companies_match("北京三快在线科技有限公司", "美团"))
+        self.assertTrue(companies_match("上海宽娱数码科技有限公司", "哔哩哔哩"))
+
+        # 4. Word .docx 原生解析 + 含括号地域主体提取 + 叙事前缀剥离 + 压缩 PDF 部分漏提预警
+        docx_path = self.root / "resume_sample.docx"
+        docx_xml = (
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body>"
+            "<w:p><w:r><w:t>2021年3月就职于腾讯科技（深圳）有限公司</w:t></w:r></w:p>"
+            "<w:p><w:r><w:t>曾任杭州远山数字科技有限公司高级产品经理</w:t></w:r></w:p>"
+            "</w:body></w:document>"
+        )
+        with zipfile.ZipFile(docx_path, "w") as zf:
+            zf.writestr("word/document.xml", docx_xml)
+        _, docx_ext = _run_cli(flags + ["config", "extract-employers", "--from-file", str(docx_path)])
+        self.assertIn("腾讯科技（深圳）有限公司", docx_ext["added_employers"])
+        self.assertIn("杭州远山数字科技有限公司", docx_ext["added_employers"])
+        _, scr_yuanshan = _run_cli(flags + ["screen-basic", "--company", "远山数字", "--title", "AI产品经理"])
+        self.assertFalse(scr_yuanshan["pass_basic"])
+        _, scr_tencent = _run_cli(flags + ["screen-basic", "--company", "腾讯音乐", "--title", "AI产品经理"])
+        self.assertFalse(scr_tencent["pass_basic"])
+
+        partial_pdf = self.root / "partial_compressed.pdf"
+        partial_pdf.write_bytes(
+            b"%PDF-1.4\n1 0 obj << /Filter /FlateDecode >> stream\x00\x9c\xffendstream\n"
+            + "深圳星辰智造科技有限公司\n".encode("utf-8")
+        )
+        from unittest import mock
+
+        with mock.patch("hiremate_lib.normalize.shutil.which", return_value=None):
+            _, pdf_ext = _run_cli(flags + ["config", "extract-employers", "--from-file", str(partial_pdf)])
+        self.assertIn("深圳星辰智造科技有限公司", pdf_ext["added_employers"])
+        self.assertIn("pdf_partial_warning", pdf_ext)
+
+        # 5. 旧版 8 状态 SQLite 表平滑迁移至 9 状态（新增 interview_scheduled）+ 跟进消警 + 状态回退时间戳清理 + 直接 upsert handed_off 通知
+        legacy_ws = self.root / "ws_legacy_db"
+        legacy_ws.mkdir(parents=True, exist_ok=True)
+        legacy_db = legacy_ws / "ledger.sqlite3"
+        conn = sqlite3.connect(legacy_db)
+        old_schema_sql = hm_ledger.SCHEMA_SQL.replace("        'interview_scheduled',\n", "")
+        conn.executescript(
+            old_schema_sql
+            + """
+            INSERT INTO jobs (job_id, company, company_clean, company_core, title, title_norm, status, handed_off_at, created_at, updated_at)
+            VALUES ('job_leg_1', '深势科技', '深势科技', '深势', 'AI产品经理', 'ai产品经理', 'handed_off', '2026-04-01T10:00:00+08:00', '2026-04-01T09:00:00+08:00', '2026-04-01T10:00:00+08:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        migrated_led = hm_ledger.JobLedger(legacy_ws)
+        self.assertEqual(migrated_led.summary()["funnel"]["handed_off_pending"], 1)
+        tr_iv = migrated_led.transition(job_id="job_leg_1", to_status="interview_scheduled", note="已约周四下午二面")
+        self.assertEqual(tr_iv["to_status"], "interview_scheduled")
+        sum_after_iv = migrated_led.summary()["funnel"]
+        self.assertEqual(sum_after_iv["handed_off_pending"], 0)
+        self.assertEqual(sum_after_iv["interview_scheduled"], 1)
+        dup_iv = migrated_led.check_duplicate(company="深势科技", title="大模型产品经理")
+        self.assertTrue(dup_iv["same_company_active"])
+
+        # 直接 upsert_job(status='handed_off') 也会触发桌面通知字段，且状态误标回退会清理里程碑计数
+        with mock.patch.dict(os.environ, {"HIREMATE_DISABLE_DESKTOP_NOTIFY": "1"}):
+            up_ho = migrated_led.upsert_job({"company": "智谱华章", "title": "AI产品专家", "status": "handed_off"})
+        self.assertIn("desktop_notification", up_ho)
+
+        base_today = migrated_led.summary()["today_opening_sent"]
+        up_open = migrated_led.upsert_job({"company": "月之暗面", "title": "AI产品经理", "status": "opening_sent"})
+        open_job_id = up_open["job"]["job_id"]
+        self.assertEqual(migrated_led.summary()["today_opening_sent"], base_today + 1)
+        migrated_led.transition(job_id=open_job_id, to_status="discovered", note="误触修正")
+        self.assertEqual(migrated_led.summary()["today_opening_sent"], base_today)
+
+        migrated_led.transition(job_id=open_job_id, to_status="resume_delivered", resume_used="AI主简历.pdf")
+        self.assertEqual(migrated_led.summary()["funnel"]["pdf_delivered_total"], 1)
+        migrated_led.transition(job_id=open_job_id, to_status="resume_requested", note="仅发请求尚未同意")
+        self.assertEqual(migrated_led.summary()["funnel"]["pdf_delivered_total"], 0)
+
+        # 6. 前东家名单零上传隐私保护 + 本地 guard-reply 拦截 + copilot 模式巡检短路 + AppleScript 尾部反斜杠防截断
+        from hiremate_lib import workspace as hm_ws
+
+        cfg3 = hm_ws.load_config(ws3)
+        pro_prefs = hm_client.config_to_pro_preferences(cfg3)
+        self.assertEqual(pro_prefs["blacklist_companies"], [])
+
+        _, local_guard_block = _run_cli(
+            flags
+            + [
+                "pro",
+                "guard-reply",
+                "--input-json",
+                json.dumps(
+                    {
+                        "job": {"company": "字节跳动", "title": "AI产品经理"},
+                        "conversation": {"incoming_message": "在看机会吗", "draft_reply": "在看的"},
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        self.assertEqual(local_guard_block["code"], "LOCAL_EMPLOYER_SHIELD_BLOCKED")
+        self.assertTrue(local_guard_block["handoff_required"])
+
+        _run_cli(flags + ["config", "set", "--execution-mode", "copilot"])
+        _, copilot_gate = _run_cli(flags + ["pro", "patrol-gate"])
+        self.assertFalse(copilot_gate["allow_unread_check"])
+        self.assertEqual(copilot_gate["reason"], "COPILOT_MODE_NO_BROWSER")
+
+        escaped_tail = hm_notifier._escape_applescript("A" * 159 + "\\")
+        self.assertTrue(escaped_tail.endswith("\\\\"))
+
+        # 7. 多宿主安装器覆盖 antigravity / cursor / windsurf
+        multi_canon = self.root / "multi_canon"
+        agy_dir = self.root / "mock_agy"
+        cur_dir = self.root / "mock_cursor"
+        ws_dir = self.root / "mock_windsurf"
+        for d in (agy_dir, cur_dir, ws_dir):
+            d.mkdir(parents=True, exist_ok=True)
+        multi_res = install_plugin.install(
+            target="auto",
+            canonical_home=str(multi_canon),
+            search_roots={"antigravity": agy_dir, "cursor": cur_dir, "windsurf": ws_dir},
+        )
+        self.assertEqual({h["host"] for h in multi_res["linked_hosts"]}, {"antigravity", "cursor", "windsurf"})
+
+    def test_audit_p0_p1_concurrency_migration_bracket_collision_xss_and_release_guards(self) -> None:
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import importlib.util
+        import sqlite3
+        import subprocess
+        from unittest import mock
+        from hiremate_lib import client as hm_client, ledger as hm_ledger
+        from hiremate_lib.normalize import (
+            companies_match,
+            employer_shield_match,
+            extract_employers_from_text,
+            title_similarity,
+        )
+
+        # 1. [P0-2] 多进程并发首次迁移旧版 8 状态 SQLite 账本：零报错、零丢表、零丢行，并生成 .pre_mig_bak 快照
+        conc_ws = self.root / "ws_conc_mig"
+        conc_ws.mkdir(parents=True, exist_ok=True)
+        conc_db = conc_ws / "ledger.sqlite3"
+        old_sql = hm_ledger.SCHEMA_SQL.replace("        'interview_scheduled',\n", "")
+        c_init = sqlite3.connect(conc_db)
+        c_init.executescript(old_sql)
+        for idx in range(120):
+            c_init.execute(
+                "INSERT INTO jobs (job_id, company, company_clean, company_core, title, title_norm, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'discovered', '2026-04-01T09:00:00+08:00', '2026-04-01T09:00:00+08:00')",
+                (f"job_c_{idx}", f"并发测试企业{idx}", f"并发测试企业{idx}", f"并发测试企业{idx}", "AI产品经理", "ai产品经理"),
+            )
+        c_init.commit()
+        c_init.close()
+
+        worker_code = (
+            f"import sys; sys.path.insert(0, {str(OPEN_ROOT)!r})\n"
+            "from pathlib import Path\n"
+            "from hiremate_lib.ledger import JobLedger\n"
+            "led = JobLedger(Path(sys.argv[1]))\n"
+            "print(led.summary()['total_evaluated'])\n"
+        )
+        procs = [
+            subprocess.Popen([sys.executable, "-B", "-c", worker_code, str(conc_ws)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            for _ in range(4)
+        ]
+        for p in procs:
+            out_s, err_s = p.communicate(timeout=15)
+            self.assertEqual(p.returncode, 0, msg=f"Concurrent migration failed: {err_s}")
+            self.assertEqual(out_s.strip(), "120")
+        self.assertTrue(conc_db.with_suffix(".sqlite3.pre_mig_bak").is_file())
+
+        # 2. [P0-3 & P1-3] 括号地域/属性不互撞、太平洋保险不误杀太平洋汽车、短词不跨行业误杀、行政区括号不漏判
+        self.assertFalse(companies_match("甲科技（江西）有限公司", "乙网络（江西）有限公司"))
+        self.assertFalse(companies_match("西门子(China)", "SAP(China)"))
+        self.assertFalse(employer_shield_match("乙公司（上市公司）", "甲公司（上市公司）"))
+        self.assertFalse(employer_shield_match("乙公司（A轮）", "甲公司（A轮）"))
+        self.assertFalse(employer_shield_match("太平洋汽车网", "中国太平洋保险（集团）股份有限公司"))
+        self.assertFalse(employer_shield_match("阳光科技有限公司", "阳光保险"))
+        self.assertFalse(employer_shield_match("博冠光电", "网易"))
+        self.assertFalse(employer_shield_match("海思科医药", "华为"))
+        self.assertFalse(employer_shield_match("阿里斯顿", "阿里巴巴"))
+        self.assertFalse(employer_shield_match("字节星球", "字节跳动"))
+
+        self.assertTrue(employer_shield_match("平安科技", "中国平安保险（集团）股份有限公司"))
+        self.assertTrue(employer_shield_match("阿里云计算有限公司", "阿里巴巴"))
+        self.assertTrue(employer_shield_match("深圳市海思半导体有限公司", "华为"))
+        self.assertTrue(employer_shield_match("上海博冠网络科技有限公司", "网易"))
+        self.assertEqual(title_similarity("产品经理", "产品经理（朝阳区）"), 1.0)
+
+        # 3. [P1-2] 简历雇主提取：剥离时间线/第一人称粘连前缀，排除甲乙方合作描述
+        resume_snippet = (
+            "2019.07-2022.03就职于北京字节跳动科技有限公司；\n"
+            "我在腾讯科技（深圳）有限公司担任高级工程师；\n"
+            "曾在阿里巴巴（中国）有限公司任职；\n"
+            "毕业后入职深圳市腾讯计算机系统有限公司；\n"
+            "项目职责：负责与华为技术有限公司的合作对接及交付。"
+        )
+        extracted_emps = extract_employers_from_text(resume_snippet)
+        self.assertIn("北京字节跳动科技有限公司", extracted_emps)
+        self.assertIn("腾讯科技（深圳）有限公司", extracted_emps)
+        self.assertIn("阿里巴巴（中国）有限公司", extracted_emps)
+        self.assertIn("深圳市腾讯计算机系统有限公司", extracted_emps)
+        self.assertFalse(any("华为" in x for x in extracted_emps))
+        self.assertTrue(any(employer_shield_match("字节跳动", x) for x in extracted_emps))
+        self.assertTrue(any(employer_shield_match("腾讯", x) for x in extracted_emps))
+        self.assertTrue(any(employer_shield_match("阿里巴巴", x) for x in extracted_emps))
+
+        # 4. [P0-4 & P1-7] 被动来信无历史 job_id 直接 transition 自动建档弹窗 + 已送达岗位标 screened_skip 不扣减当日配额
+        ws4 = self.root / "ws_p04"
+        home4 = self.root / "home_p04"
+        flags4 = ["--home", str(home4), "--workspace", str(ws4), "--api-base", self.api_base]
+        _run_cli(flags4 + ["init", "--account-name", "林远", "--roles", "AI产品经理"])
+
+        rc_tr_auto, tr_auto = _run_cli(
+            flags4
+            + [
+                "ledger",
+                "transition",
+                "--company",
+                "新来信智能科技",
+                "--title",
+                "AI产品专家",
+                "--status",
+                "handed_off",
+                "--note",
+                "HR主动来信约周五下午面试",
+            ]
+        )
+        self.assertEqual(rc_tr_auto, 0)
+        self.assertTrue(tr_auto.get("auto_created"))
+        self.assertEqual(tr_auto["to_status"], "handed_off")
+        self.assertIn("desktop_notification", tr_auto)
+
+        led4 = hm_ledger.JobLedger(ws4)
+        sent_job = led4.upsert_job({"company": "阶跃星辰", "title": "AI产品经理", "status": "opening_sent"})
+        today_before = led4.summary()["today_opening_sent"]
+        self.assertGreaterEqual(today_before, 1)
+        led4.transition(job_id=sent_job["job"]["job_id"], to_status="screened_skip", note="聊后发现为驻场岗")
+        self.assertEqual(led4.summary()["today_opening_sent"], today_before)
+
+        # Pro 老用户首次 auth status 展示激活菜单，后续常规 auth status 不再重复刷屏
+        if HAS_PRO_SERVER and self.srv is not None:
+            self.srv.store.grant_pro(email="pro_once@example.com", days=0)
+            _, st_start = _run_cli(flags4 + ["auth", "login", "--no-wait"])
+            self.srv.store.approve_device_auth(user_code=st_start["user_code"], email="pro_once@example.com")
+            _, login_first = _run_cli(flags4 + ["auth", "login", "--wait-seconds", "5"])
+            self.assertIn("pro_activation_guide", login_first)
+            _, status_repeat = _run_cli(flags4 + ["auth", "status"])
+            self.assertEqual(status_repeat["tier"], "pro")
+            self.assertNotIn("pro_activation_guide", status_repeat)
+
+        # 5. [P1-8] 看板 XSS 载荷转义回归（公司名/岗位/HR/备注/恶意 javascript: URL）
+        xss_payload = '"><img src=x onerror=alert(1)></script>'
+        led4.upsert_job(
+            {
+                "company": f"测试企业{xss_payload}",
+                "title": f"产品经理{xss_payload}",
+                "recruiter_name": f"张HR{xss_payload}",
+                "note": f"备注{xss_payload}",
+                "job_url": "javascript:alert(1)",
+                "status": "discovered",
+            }
+        )
+        _, dash_xss = _run_cli(flags4 + ["build-dashboard"])
+        raw_html = Path(dash_xss["out_path"]).read_text(encoding="utf-8")
+        self.assertNotIn("<img src=x onerror=alert(1)>", raw_html)
+        self.assertNotIn("javascript:alert(1)", raw_html)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", raw_html)
+
+        # 6. [P1-6] Windows Junction 安全移除分支模拟验证
+        junc_dir = self.root / "fake_junction"
+        junc_dir.mkdir(parents=True, exist_ok=True)
+        with mock.patch.object(install_plugin, "_is_windows_reparse_point", return_value=True):
+            with mock.patch("os.rmdir") as mock_rmdir:
+                self.assertTrue(install_plugin._remove_link_or_dir(junc_dir))
+                mock_rmdir.assert_called_once_with(junc_dir)
+
+        # 7. [P1-4 & P1-8] 发布扫描器负向埋点检测 & 导出器危险目标目录拦截
+        scan_spec = importlib.util.spec_from_file_location(
+            "scan_before_release", OPEN_ROOT / "scripts" / "scan_before_release.py"
+        )
+        assert scan_spec and scan_spec.loader
+        scan_mod = importlib.util.module_from_spec(scan_spec)
+        scan_spec.loader.exec_module(scan_mod)
+
+        dirty_dir = self.root / "dirty_open"
+        dirty_dir.mkdir(parents=True, exist_ok=True)
+        (dirty_dir / "leak_resume.pdf").write_bytes(b"%PDF-1.4 secret resume")
+        (dirty_dir / "leak_tok.txt").write_text("token = hm_live_" + "f" * 32, encoding="utf-8")
+        scan_bad = scan_mod.scan(dirty_dir)
+        self.assertFalse(scan_bad["ok"])
+        self.assertGreaterEqual(len(scan_bad["issues"]), 2)
+
+        export_script = OPEN_ROOT.parent / "scripts" / "export_open_release.py"
+        if export_script.is_file():
+            exp_spec = importlib.util.spec_from_file_location("export_open_release", export_script)
+            assert exp_spec and exp_spec.loader
+            exp_mod = importlib.util.module_from_spec(exp_spec)
+            exp_spec.loader.exec_module(exp_mod)
+            with self.assertRaises(ValueError):
+                exp_mod._validate_safe_out_dir(OPEN_ROOT.parent)
+            with self.assertRaises(ValueError):
+                exp_mod._validate_safe_out_dir(OPEN_ROOT.parent.parent)
+            with self.assertRaises(ValueError):
+                exp_mod._validate_safe_out_dir(Path.home())
+
+        # 8. [P2] 异源 302 重定向自动剥离 Authorization 头防泄露
+        captured_auth_headers: list[str | None] = []
+
+        class _TargetHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                captured_auth_headers.append(self.headers.get("Authorization"))
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt: str, *args) -> None:
+                pass
+
+        target_srv = HTTPServer(("127.0.0.1", 0), _TargetHandler)
+        t_tgt = threading.Thread(target=target_srv.serve_forever, daemon=True)
+        t_tgt.start()
+        target_port = target_srv.server_address[1]
+
+        class _RedirHandler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                self.send_response(302)
+                self.send_header("Location", f"http://localhost:{target_port}/landed")
+                self.end_headers()
+
+            def log_message(self, fmt: str, *args) -> None:
+                pass
+
+        redir_srv = HTTPServer(("127.0.0.1", 0), _RedirHandler)
+        t_red = threading.Thread(target=redir_srv.serve_forever, daemon=True)
+        t_red.start()
+        try:
+            st_r, _ = hm_client._http_json(
+                "GET",
+                f"http://127.0.0.1:{redir_srv.server_address[1]}/start",
+                token="hm_live_secret_should_not_leak",
+            )
+            self.assertEqual(st_r, 200)
+            self.assertEqual(captured_auth_headers, [None])
+        finally:
+            redir_srv.shutdown()
+            redir_srv.server_close()
+            target_srv.shutdown()
+            target_srv.server_close()
 
 
 if __name__ == "__main__":

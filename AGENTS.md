@@ -40,17 +40,17 @@ python3 ~/.hiremate/skill/hiremate/hiremate.py auth status
 ```
 
 - **【安全死红线】严禁使用 Headless 无头模式、每次新建空白临时窗口，或 `curl`/`wget`/Python `urllib`/`requests` 爬虫脚本请求 BOSS 直聘网页**（必触发反爬风控伤及用户账号）！
-- **若用户明确提到“登录 / 绑定账户 / 我买了 Pro / 开通 Pro”**：先运行 `python3 ~/.hiremate/skill/hiremate/hiremate.py auth login`（或 `auth upgrade`）弹出系统默认浏览器完成免验证码一键设备授权（此步仅弹网页，无需浏览器操控权限），确认 `tier` 状态后紧接着进入第三步（切勿登完就停下冷场）；
+- **若用户明确提到“登录 / 绑定账户 / 我买了 Pro / 开通 Pro”**：运行 `auth login` 完成免验证码浏览器设备配对（未购买需打开收银台时运行 `auth upgrade`，付完款后再跑 `auth login` 绑定本机或 `auth status` 同步）；**当返回 JSON 中包含 `pro_activation_guide`（首次绑定或刚升级为 Pro）时**，**严禁只说一句“登录成功”就停下**——必须向用户展示 `pro_activation_guide` 中的 **5 项已解锁 Pro 高级权益**，并明确告知当前「主动找岗」与「消息答疑」若仍为免费版默认的**半自动（`semi`）**，现已可切换为**全自动模式（`auto`）** + 开启工作日错峰自动巡检（若尚未建档则紧接着进入第三步建档）；日常会话中若老用户已展示过引导且无 `pro_activation_guide` 字段，则静默读取 `tier` 不重复打扰；
 - **若为普通免费版新用户（未提及登录或付费）**：**绝不强制注册登录，绝不生硬推销付费**！开源免费版免登录即可完整使用。
 
-## 第三步：向用户展示《四项启动准备核对单（Checklist）》并完成 5 分钟建档
+## 第三步：向用户展示《四项启动准备核对单》与《8 项职位筛选策略表》，确认后建档
 
 若 `onboarding_completed` 为 `false`（或 `browser_provider` 尚未选定），请用清晰友好的中文向用户展示**《启动准备核对单》**，带用户一次性核对：
 
 1. **`[核对项 1 · 浏览器操控通道选择]`**：
    - **分支 A · 宿主自带 Browser Use【不支持】有头 + 持久化**（如无内置浏览器、仅支持 Headless 无头模式、或用完即毁的临时实例）：
      - **直接跳过自带 Browser Use，安装并使用 `ego lite`（`ego-browser`），并明确告知用户原因**：BOSS 直聘风控极严，无头或临时浏览器极易掉登录并触发滑块/封控，因此已自动跳过宿主自带 Browser Use，切换为支持有头持久化登录态的 `ego lite`；
-     - 若本机已安装 `ego-browser`（`checklist` 返回 `ego_lite_installed: true`），直接运行 `config set --browser-provider ego_lite` 启用；若未安装，立即协助安装（macOS 可执行 `ego-browser` 技能内置 `install.sh` 拉起应用，Windows/通用引导下载 <https://lite.ego.app/> 并完成首次打开引导以注册 `ego-browser` 命令），就绪后运行 `config set --browser-provider ego_lite`（仅当用户明确表示当前受限环境无法装软件时，运行 `config set --execution-mode copilot` 切入「副驾驶粘贴模式」继续）。
+     - 若本机已安装 `ego-browser`（`checklist` 返回 `ego_lite_installed: true`），直接运行 `config set --browser-provider ego_lite` 启用；若未安装，立即协助安装（若本机已有 `ego-browser` 技能的 `scripts/install.sh` 可直接执行；新机首次安装请引导下载 <https://lite.ego.app/> 完成安装与首次打开引导，每次操作网页前运行 `ego-browser skill` 读取当前版本使用指南），就绪后运行 `config set --browser-provider ego_lite`（仅当用户明确表示当前受限环境无法装软件时，运行 `config set --execution-mode copilot` 切入「副驾驶粘贴模式」继续）。
    - **分支 B · 宿主自带 Browser Use【支持】有头可见 + 登录态持久化**：
      - 若 `browser_provider` 仍为 `"auto"`，**把选择权交给用户**，请用户按自身 Token 情况二选一：
        1. **想节省 Token → 安装并使用 `ego lite`**：基于紧凑 DOM 引用快照，大幅降低单轮搜岗与 Pro 定时巡检 Token 消耗（未安装则顺手代装，选定后运行 `config set --browser-provider ego_lite`）；
@@ -62,20 +62,28 @@ python3 ~/.hiremate/skill/hiremate/hiremate.py auth status
      - **你有浏览器权限时**：直接打开 `https://www.zhipin.com/web/geek/resume` 自动读取用户的**在线简历全文**（提取全部过往雇主、项目成果与求职期望）用于建档！同时顺手看一眼右侧「附件简历」栏：若附件数为 0，提醒用户可点在线简历右上角「生成附件简历」一键转存线上 PDF，或先传 `--resume-source online_only` 记录为仅在线简历模式；
      - **你无浏览器权限时（副驾驶模式）**：请用户在 BOSS 在线简历页点导出 PDF 拖进对话，或直接全选复制在线简历文字发进对话；
    - **情况 C（既无本地简历，平台也没填在线简历）**：**【硬性红线停步】** 运行 `config set --resume-source none`，明确温和告知用户：没有真实简历底座无法继续（严禁无中生有编造经历或漏防前东家），请先去 BOSS 填好在线简历或准备一份基础简历后再随时喊你继续。
-4. **`[核对项 4 · 求职边界与筛选偏好（给清默认值，只改不满意的）]`**：
-   - 目标岗位词、优先城市、期望最低月薪（K）（优先从简历/在线简历自动提取供确认）；
-   - **外包 / 派遣 / OD 接受度**与**驻场办公接受度**（默认均排除，支持各自独立设为「排除 / 仅接被动来信 / 完全开放」）；
-   - 额外想拉黑的企业（简历/在线简历中的全部前东家会自动归一化拉黑）。
+4. **`[核对项 4 · 全部 8 项职位筛选策略透明确认（严禁暗箱静默套用默认值！）]`**：
+   - **必须把以下 8 项默认筛选策略完整列给用户确认是否需要修改**（绝不能让用户事后自己去翻求职看板才发现这些规则）：
+     1. **目标岗位方向**（从简历提炼预填）；
+     2. **优先城市 & 异地大厂弹性**（默认**开启**「异地知名大厂可先聊」，不想看异地大厂可传 `--remote-bigtech-flex false`）；
+     3. **期望最低月薪 & 面板标薪容忍度**（默认**开启**「容忍面板标薪略低约 20% 先聊」，想严格卡死标薪可传 `--salary-panel-tolerance false`）；
+     4. **外包 / 派遣 / OD 策略**（默认 `block_all` 全部排除；支持 `inbound_only` 仅接被动来信 / `allow_all` 开放）；
+     5. **驻场 / 现场外派策略**（默认 `block_all` 全部排除；可与外包独立分开设置）；
+     6. **猎头渠道策略**（默认 `inbound_only` 主动搜岗不投猎头、仅接猎头主动优质来信；可改 `block_all` 全部屏蔽 / `allow_all` 全部开放）；
+     7. **自动拉黑前东家 + 额外屏蔽企业 + 岗位排除词**（简历中的全部前东家自动同字号拉黑；支持追加 `--blocked-companies` 与 `--exclude-keywords`）；
+     8. **被动索要简历策略 & 自动化档位**（默认 `generous` 除非明显不符尽量给，可改 `strict`；免费版为半自动审阅，Pro 版可随时将主动找岗与消息答疑切换为 `auto` 全自动）。
 
 拿到简历内容（本地文件或在线简历）后：
-1. 先输出精简**《求职建档确认单》**（含前东家屏蔽清单、筛选偏好、《个人求职事实与答法档案》摘要）请用户点头确认；
-2. 确认后运行 `hiremate.py init --employers "<全部前东家>" --roles "..." --cities "..." --min-salary-k ... --resume-source <attachment_pdf|online_only|both>`，并将确认后的档案写入 `profile_facts_file`；
+1. **先输出精简清晰的《求职建档与 8 项筛选策略确认单》**（含提炼的《个人求职事实与答法档案》摘要、自动识别的前东家名单、以及上述 **全部 8 项筛选策略的当前设定值**），明确请用户确认或指出要修改的项（**未经展示确认，严禁直接静默调 `init` 把默认策略偷偷落盘**）；
+2. 用户点头确认（或按用户意见调整对应参数）后，运行 `hiremate.py init --employers "<全部前东家>" --roles "..." --cities "..." --min-salary-k ... --resume-source <attachment_pdf|online_only|both>`（附带用户修改的策略参数），并将确认后的档案写入 `profile_facts_file`；
 3. 有浏览器权限时核对 BOSS 右上角本人姓名（`--account-name`）与线上「附件简历」精确文件名（写入 `resume_routes`）；副驾驶模式下口头询问确认即可。
 
-## 第四步：按「版本 × 浏览器权限」闭环交付首次体验
+## 第四步：【严禁建完档停步冷场】自动生成初始看板并给出 1/2/3 下一步行动菜单
 
-- **具备浏览器权限时**：
-  - **免费基础版**：引导立即在 BOSS 执行**首轮搜岗深筛与半自动破冰预览**（出审阅单，回序号再发），并运行 `build-dashboard` 生成本地看板；
-  - **Pro 买断版**：确认找岗与答疑档位（`semi` / `auto`），跑首轮云端深度评估与看板刷新，并主动询问是否一键挂载**工作日错峰自动巡检定时任务**（周一至周五 `09:00–12:00`、`14:00–18:00` 每 10～15 分钟）。
-- **无浏览器权限（`copilot` 副驾驶粘贴模式）时**：
-  - 刷新生成初始 `dashboard.html` 看板，并引导用户直接把看到的 BOSS 岗位 JD 或 HR 消息粘贴/截图发进对话——你照常调用 `screen-basic` / `pro evaluate-job` / `pro guard-reply` / `ledger` 完成排雷、拟定真人短句草稿与四态记账，由用户复制发送。
+完成 `init` 并将档案写入 `profile_facts_file` 后，**必须在同一条回复回合内连续做完以下两件事，绝不能只说一句“建档已完成”就结束对话**：
+
+1. **立即顺手生成初始求职看板**：运行 `python3 ~/.hiremate/skill/hiremate/hiremate.py build-dashboard`，把生成的 `dashboard.html` 本地路径附给用户（免费版看板内自带 Pro 一键在线买断入口与首轮启动口令）；
+2. **在回复末尾展示可一键回复数字 `1 / 2 / 3` 的《下一步开始菜单》**（直接复用 `init` 或 `build-dashboard` 返回 JSON 中的 `post_onboarding_guide.user_reply_menu_markdown`）：
+   - **具备浏览器权限时（免费版）**：明确提示用户**直接回复 `1`（推荐）**即可立即去 BOSS 直聘跑第一轮搜岗深筛与半自动破冰预览（先出审阅单，未经确认绝不点发送）；回复 `2` 可粘贴单条岗位 JD / HR 消息参谋；回复 `3` 查看看板或微调筛选条件；
+   - **具备浏览器权限时（Pro 买断版）**：提示回复 `1` 立即跑首轮 Pro 深度排雷筛岗 + 检查未读消息；回复 `2` 一键挂载**工作日错峰自动巡检定时任务**（周一至周五 `09:00–12:00`、`14:00–18:00` 每 10～15 分钟）；回复 `3` 调整 `semi` / `auto` 档位；
+   - **无浏览器权限（`copilot` 副驾驶粘贴模式）时**：提示回复 `1` 或直接把 BOSS 岗位 JD / 截图贴进对话试跑排雷与破冰草稿；回复 `2` 粘贴 HR 追问消息拟真人短句回复；回复 `3` 开启浏览器自动直连模式。

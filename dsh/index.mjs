@@ -123,7 +123,7 @@ export function apply(ctx) {
                 : (auth?.days_left ? `剩余 ${auth.days_left} 天` : '生效中')
               const tierLine = auth?.active
                 ? `Pro 专业版生效中 · 账号 ${auth.email} · ${validityText}\n服务说明：${auth.updates_policy || '一次买断长期有效，持续享受常规功能更新与排雷词库升级'}`
-                : '当前版本：免费基础版（免登录即可建档筛岗；输入 /hiremate-login 绑定账户，输入 /hiremate-login pro 打开 ¥39.9 买断开通页）'
+                : '当前版本：免费基础版（免登录即可建档筛岗；输入 /hiremate-login 绑定账户，输入 /hiremate-login pro 打开 ¥69 买断开通页）'
               const onboardLine = cfgResp?.onboarding_completed
                 ? null
                 : (cfgResp?.hard_blocker === 'NO_RESUME_AVAILABLE'
@@ -140,7 +140,10 @@ export function apply(ctx) {
                 ? '仅平台在线简历（无PDF附件）'
                 : (cfgResp?.resume_ready ? '真实履历与附件已就绪' : '待提供简历')
               const autoTag = (m) => (m === 'auto' ? '全自动' : '半自动确认')
-              const prefLine = `运行模式：${modeLabel} ｜ 档位：找岗「${autoTag(cfg.mode_discover)}」/ 回复「${autoTag(cfg.mode_reply)}」 ｜ 简历底座：${resumeLabel}\n筛选偏好：外包/派遣/OD「${policyText(cfg.outsourcing_policy, cfg.filter_outsourcing)}」 ｜ 驻场/外派「${policyText(cfg.onsite_policy, cfg.filter_onsite)}」`
+              const prefLine = `运行模式：${modeLabel} ｜ 档位：找岗「${autoTag(cfg.mode_discover)}」/ 回复「${autoTag(cfg.mode_reply)}」 ｜ 简历底座：${resumeLabel}\n筛选偏好：外包/派遣/OD「${policyText(cfg.outsourcing_policy, cfg.filter_outsourcing)}」 ｜ 驻场/外派「${policyText(cfg.onsite_policy, cfg.filter_onsite)}」 ｜ 猎头「${policyText(cfg.headhunter_policy, true)}」`
+              const proUpgradeHint = (auth?.active && cfgResp?.onboarding_completed && (cfg.mode_discover !== 'auto' || cfg.mode_reply !== 'auto'))
+                ? '💡 Pro 全自动提醒：当前主动找岗/消息答疑仍为「半自动确认」，直接对助手说「开启 Pro 全自动模式并挂上工作日巡检」即可一键升级全托管！'
+                : null
               const funnelLine = [
                 `累计深筛 ${f.screened_total ?? 0} 岗（排雷跳过 ${f.screened_skip ?? 0}）`,
                 `开场已送达 ${f.opening_delivered_total ?? 0}`,
@@ -150,6 +153,7 @@ export function apply(ctx) {
               ].join(' ｜ ')
               const lines = ['【求职助手状态】', tierLine]
               if (onboardLine) lines.push(onboardLine)
+              if (proUpgradeHint) lines.push(proUpgradeHint)
               lines.push(prefLine, `投递漏斗：${funnelLine}`)
               return { kind: 'success', text: lines.join('\n') }
             } catch (err) {
@@ -160,26 +164,34 @@ export function apply(ctx) {
 
         disposers.push(cmdCtx.commands.register({
           name: 'hiremate-login',
-          description: '免验证码一键浏览器账户设备配对，或传入 pro 直接打开 Pro 买断开通页（¥39.9）',
-          input: { hint: '[可选：输入 pro 直接打开 ¥39.9 在线买断收银台]' },
+          description: '免验证码一键浏览器账户设备配对，或传入 pro 直接打开 Pro 买断开通页（特惠 ¥69）',
+          input: { hint: '[可选：输入 pro 直接打开 ¥69 在线买断收银台]' },
           handler: async (invocation) => {
             const rawArg = String(invocation?.args || invocation?.input || '').trim().toLowerCase()
             try {
               if (rawArg === 'pro' || rawArg === 'upgrade' || rawArg === 'buyout') {
                 const upg = await runHiremateCli(cliPath, ['auth', 'upgrade', '--plan', 'pro_buyout'])
+                const bindHint = upg?.email
+                  ? '支付完成后买断权益永久绑定至当前账户；随后运行 /hiremate-status 即可同步生效。'
+                  : '支付完成后请再运行一次 /hiremate-login 将本机绑定至你的账户（无需输入任何激活码）。'
                 return {
                   kind: 'success',
                   text: [
-                    '已在浏览器打开 Pro 买断开通中心（早鸟买断 ¥39.9，支持微信支付 / 支付宝秒级直充账户）：',
+                    '已在浏览器打开 Pro 买断开通中心（特惠买断 ¥69 / 原价 ¥99，支持微信支付 / 支付宝秒级直充账户）：',
                     `🔗 ${upg.upgrade_url}`,
-                    '支付完成后买断权益永久绑定至当前账户，无需复制粘贴任何激活码。',
+                    bindHint,
                   ].join('\n'),
                 }
               }
 
               const pair = await runHiremateCli(cliPath, ['auth', 'login', '--no-wait'])
               if (pair?.status === 'authorized') {
-                return { kind: 'success', text: pair.message || `设备已绑定（${pair.email}）` }
+                const guideMd = pair?.pro_activation_guide?.user_reply_menu_markdown
+                const outLines = [pair.message || `设备已绑定（${pair.email}）`]
+                if (guideMd) {
+                  outLines.push('', guideMd, '', '💬 也可直接在对话框对助手说：「帮我开启 Pro 全自动模式并挂上工作日巡检」')
+                }
+                return { kind: 'success', text: outLines.join('\n') }
               }
               return {
                 kind: 'success',

@@ -654,7 +654,7 @@ def render_dashboard_html(
         if is_pro
         else (
             f'<a class="header-pill badge-upgrade-cta" href="{pro_checkout_url}" '
-            f'target="_blank" rel="noopener noreferrer">⚡ ¥39.9 购买解锁 Pro →</a>'
+            f'target="_blank" rel="noopener noreferrer">⚡ ¥69 购买解锁 Pro →</a>'
         )
     )
 
@@ -668,7 +668,7 @@ def render_dashboard_html(
           <span class="upgrade-headline">已包含建档防撞车、单轮找岗初筛、半自动破冰待确认队列与本地四态账本</span>
         </div>
         <div class="upgrade-features">
-          <strong>早鸟 ¥39.9 一次买断解锁全链路托管：</strong>
+          <strong>特惠 ¥69（原价 ¥99）一次买断解锁全链路托管：</strong>
           <span>① 找岗全自动破冰 + 工作日错峰巡检</span>
           <span>② HR 未读消息真人感答疑（约面 / 谈薪 / 微信自动停手交回本人）</span>
           <span>③ 100+ 深度外包词库 + 多版 PDF 简历路由</span>
@@ -677,7 +677,7 @@ def render_dashboard_html(
       </div>
       <div class="upgrade-right">
         <div class="upgrade-btn-row">
-          <a class="upgrade-cta-btn" href="{pro_checkout_url}" target="_blank" rel="noopener noreferrer">¥39.9 立即购买解锁 Pro →</a>
+          <a class="upgrade-cta-btn" href="{pro_checkout_url}" target="_blank" rel="noopener noreferrer">¥69 立即购买解锁 Pro →</a>
           <a class="upgrade-secondary-btn" href="{pro_pricing_url}" target="_blank" rel="noopener noreferrer">查看功能对比</a>
         </div>
         <div class="upgrade-cmd-label">
@@ -744,7 +744,7 @@ def render_dashboard_html(
             '激活 Pro 后，求职助手会在工作日错峰自动答复 HR 常规背景追问并投递对应 PDF 简历；'
             '一旦遇到「约面试时间 / 要微信电话 / 压薪谈底线」，将自动暂停回复并置顶在此处提醒你本人接管。<br/>'
             f'<a class="inline-pro-link" href="{pro_checkout_url}" target="_blank" rel="noopener noreferrer">'
-            '⚡ 前往开通 Pro 全托管（早鸟 ¥39.9 一次买断 · 无月费） →</a>'
+            '⚡ 前往开通 Pro 全托管（特惠 ¥69 · 原价 ¥99 · 一次买断无月费） →</a>'
             '</div>'
         )
     discovered_html = (
@@ -762,6 +762,7 @@ def render_dashboard_html(
     filter_defs = [
         ("all", "全部", len(jobs)),
         ("handed_off", "待本人约面/决策", by_status.get("handed_off", 0)),
+        ("interview_scheduled", "已约面/跟进中", by_status.get("interview_scheduled", 0)),
         ("discovered", "待确认候选", by_status.get("discovered", 0)),
         ("resume_delivered", "PDF 简历已送达", by_status.get("resume_delivered", 0)),
         ("resume_requested", "待同意请求", by_status.get("resume_requested", 0)),
@@ -1230,6 +1231,7 @@ def render_dashboard_html(
     }}
 
     .status-handed_off {{ background: var(--accent-amber-bg); color: var(--accent-amber); border: 1px solid #fcd34d; }}
+    .status-interview_scheduled {{ background: #dcfce7; color: #166534; border: 1px solid #86efac; }}
     .status-discovered {{ background: var(--primary-soft); color: var(--primary); border: 1px solid #bfdbfe; }}
     .status-resume_delivered {{ background: var(--success-bg); color: var(--success); border: 1px solid #a7f3d0; }}
     .status-resume_requested {{ background: var(--purple-bg); color: var(--purple); border: 1px solid #ddd6fe; }}
@@ -1800,6 +1802,9 @@ def render_dashboard_html(
       .strategy-grid {{
         grid-template-columns: 1fr;
       }}
+      .launchpad-grid {{
+        grid-template-columns: 1fr;
+      }}
       .tab-btn {{
         padding: 7px 11px;
         font-size: 13px;
@@ -1939,16 +1944,16 @@ def render_dashboard_html(
       <section id="tab-strategy" class="tab-panel">
         <div class="strategy-grid">
           <div class="strategy-card">
-            <h3>自动化档位与作息护栏 {"<span class='pro-active-pill'>Pro 托管已生效</span>" if is_pro else "<span class='lock-pill'>部分需升级 Pro</span>"}</h3>
+            <h3>自动化档位与作息护栏 {"<span class='pro-active-pill'>Pro 托管已生效</span>" if is_pro else f"<a class='lock-pill' href='{pro_checkout_url}' target='_blank' rel='noopener noreferrer'>升级 Pro 解锁 →</a>"}</h3>
             <div class="kv-list">
               <div class="kv-item"><span class="kv-key">交互运行模式</span><span class="kv-val">{"副驾驶粘贴协同（无浏览器操控权限兜底）" if str(config.get("execution_mode", "browser")) == "copilot" else ("浏览器直连自动化 · ego lite（省 Token 持久化窗口）" if str(config.get("browser_provider", "auto")) == "ego_lite" else ("浏览器直连自动化 · 宿主自带 Browser Use（有头持久化）" if str(config.get("browser_provider", "auto")) == "builtin_browser_use" else "浏览器直连自动化（复用已登录窗口）"))}</span></div>
-              <div class="kv-item"><span class="kv-key">简历底座形态</span><span class="kv-val">{"仅平台在线简历（建议在 BOSS 在线简历页生成附件 PDF）" if (str(config.get("resume_source", "")) == "online_only" or not bool(config.get("has_attachment_resume", True))) else "平台在线 + PDF 附件简历齐全"}</span></div>
+              <div class="kv-item"><span class="kv-key">简历底座形态</span><span class="kv-val">{"暂无简历（请先准备本地简历或填写平台在线简历）" if str(config.get("resume_source", "")) == "none" else ("待导入简历（请拖入 PDF 或授权读取平台在线简历）" if str(config.get("resume_source", "")) == "pending" else ("仅平台在线简历（建议在 BOSS 在线简历页生成附件 PDF）" if (str(config.get("resume_source", "")) == "online_only" or not bool(config.get("has_attachment_resume", True))) else "平台在线 + PDF 附件简历齐全"))}</span></div>
               <div class="kv-item"><span class="kv-key">主动找岗模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_discover", "semi")))) if is_pro else "半自动确认（全自动破冰需 Pro）"}</span></div>
               <div class="kv-item"><span class="kv-key">消息答疑模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_reply", "semi")))) if is_pro else "未启用（Pro 解锁半自动/全自动答疑）"}</span></div>
               <div class="kv-item"><span class="kv-key">错峰巡检时间窗</span><span class="kv-val">{(_esc("仅工作日 " if sched.get("weekdays_only", True) else "每日 ") + _esc(windows_text)) if is_pro else "未启用（Pro 解锁工作日错峰巡检）"}</span></div>
               <div class="kv-item"><span class="kv-key">轮次最小间隔</span><span class="kv-val">{f"{int(sched.get('min_interval_minutes', 90))} 分钟" if is_pro else "手动触发单轮"}</span></div>
               <div class="kv-item"><span class="kv-key">单轮 / 单日沟通上限</span><span class="kv-val">每轮 {int(sched.get("max_per_round", 5))} 岗 / 每日 {int(sched.get("max_per_day", 20))} 岗</span></div>
-              <div class="kv-item"><span class="kv-key">Pro 权益模式</span><span class="kv-val">{"买断版生效中：长期有效，持续享受常规功能更新与排雷词库升级" if is_pro else "早鸟 ¥39.9 一次买断解锁全自动托管与排雷词库更新"}</span></div>
+              <div class="kv-item"><span class="kv-key">Pro 权益模式</span><span class="kv-val">{"买断版生效中：长期有效，持续享受常规功能更新与排雷词库升级" if is_pro else f"<a class='inline-pro-link' style='margin-top:0;' href='{pro_checkout_url}' target='_blank' rel='noopener noreferrer'>特惠 ¥69（原价 ¥99）一次买断解锁全自动托管与排雷词库更新 →</a>"}</span></div>
             </div>
           </div>
 
@@ -1965,7 +1970,7 @@ def render_dashboard_html(
           </div>
 
           <div class="strategy-card full-span">
-            <h3>多版本平台 PDF 简历路由映射（被动索要策略：{_esc(_inbound_resume_cn(str(config.get("inbound_resume_policy", "generous"))))}）{"<span class='pro-active-pill'>Pro 自动路由中</span>" if is_pro else "<span class='lock-pill'>Pro 解锁自动匹配发送</span>"}</h3>
+            <h3>多版本平台 PDF 简历路由映射（被动索要策略：{_esc(_inbound_resume_cn(str(config.get("inbound_resume_policy", "generous"))))}）{"<span class='pro-active-pill'>Pro 自动路由中</span>" if is_pro else f"<a class='lock-pill' href='{pro_checkout_url}' target='_blank' rel='noopener noreferrer'>Pro 解锁自动匹配发送 →</a>"}</h3>
             <table class="route-table">
               <thead>
                 <tr>
@@ -2043,6 +2048,38 @@ def render_dashboard_html(
           filterButtons.forEach(function (p) {{ p.classList.remove("active"); }});
           pill.classList.add("active");
           applyLedgerFilter();
+        }});
+      }});
+
+      const copyButtons = document.querySelectorAll("[data-copy]");
+      copyButtons.forEach(function (btn) {{
+        btn.addEventListener("click", function () {{
+          const text = btn.getAttribute("data-copy") || "";
+          if (!text) return;
+          const orig = btn.getAttribute("data-orig-label") || btn.textContent;
+          btn.setAttribute("data-orig-label", orig);
+          const doneLabel = btn.getAttribute("data-done-label") || "✓ 已复制";
+          function markCopied() {{
+            btn.textContent = doneLabel;
+            setTimeout(function () {{ btn.textContent = orig; }}, 2200);
+          }}
+          if (navigator.clipboard && navigator.clipboard.writeText) {{
+            navigator.clipboard.writeText(text).then(markCopied).catch(function () {{
+              const ta = document.createElement("textarea");
+              ta.value = text;
+              document.body.appendChild(ta);
+              ta.select();
+              try {{ document.execCommand("copy"); markCopied(); }} catch (e) {{}}
+              document.body.removeChild(ta);
+            }});
+          }} else {{
+            const ta = document.createElement("textarea");
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            try {{ document.execCommand("copy"); markCopied(); }} catch (e) {{}}
+            document.body.removeChild(ta);
+          }}
         }});
       }});
     }})();
