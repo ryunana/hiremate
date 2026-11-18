@@ -290,7 +290,8 @@ _NEGATED_OUTSOURCING_ONLY_RE = re.compile(
     r"自研非外包|甲方直招|甲方直签|甲方面试|本部直招|外包管理|供应商管理|管理外包团队)"
 )
 _NEGATED_ONSITE_ONLY_RE = re.compile(
-    r"(?:(?:非|不是|无需|不需要|不需|不用|无|免|拒绝|不接受|不涉及|不含|并非)(?:长期|银行|客户|现场|异地|项目)?(?:驻场|外派|派驻)|本部办公)"
+    r"(?:(?:非|不是|无需|不需要|不需|不用|无|免|拒绝|不接受|不涉及|不含|并非)(?:长期|银行|客户|现场|异地|项目)?(?:驻场|外派|派驻)|"
+    r"本部办公|现场调研|深入(?:业务|用户|客户|一线)现场|一线调研|走访(?:客户|现场|一线))"
 )
 _NEGATED_OUTSOURCING_RE = re.compile(
     rf"{_NEGATED_OUTSOURCING_ONLY_RE.pattern}|{_NEGATED_ONSITE_ONLY_RE.pattern}"

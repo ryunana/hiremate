@@ -1364,6 +1364,11 @@ def basic_screen_candidate(
     matched_roles = [
         role for role in config.get("target_roles", []) if role.lower() in title.lower()
     ]
+    ui_jd_unfetched = source == "inbound" and bool(title.strip()) and not jd_text.strip()
+    if ui_jd_unfetched:
+        warnings.append(
+            f"当前会话已绑定职位「{title.strip()}」但未传入详细 JD：请先点击聊天窗顶部的职位名称或「查看职位」查看现成 JD 与公司信息，严禁向招聘方开口索要岗位职责"
+        )
     return {
         "ok": True,
         "tier_scope": "open_basic",
@@ -1375,6 +1380,7 @@ def basic_screen_candidate(
         "outsourcing_policy": out_pol,
         "onsite_policy": onsite_pol,
         "matched_target_roles": matched_roles,
+        "ui_jd_unfetched": ui_jd_unfetched,
     }
 
 

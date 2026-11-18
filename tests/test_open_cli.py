@@ -1934,6 +1934,59 @@ console.log(JSON.stringify({{ skills, commands }}));
             mock_srv.shutdown()
             mock_srv.server_close()
 
+    def test_inbound_screen_basic_unfetched_jd_warning_and_field_research_exemption(self) -> None:
+        _run_cli(
+            self._base_flags()
+            + [
+                "init",
+                "--roles",
+                "AI产品经理,产品经理",
+                "--cities",
+                "广州,深圳",
+                "--min-salary-k",
+                "20",
+                "--resume-source",
+                "attachment_pdf",
+            ]
+        )
+        # 1. 被动来信传了绑定职位标题但未点开抓 JD：返回 ui_jd_unfetched=True 提醒先点开「查看职位」
+        rc1, unfetched = _run_cli(
+            self._base_flags()
+            + [
+                "screen-basic",
+                "--company",
+                "ToDesk",
+                "--title",
+                "产品经理",
+                "--source",
+                "inbound",
+            ]
+        )
+        self.assertEqual(rc1, 0)
+        self.assertTrue(unfetched["pass_basic"])
+        self.assertTrue(unfetched["ui_jd_unfetched"])
+        self.assertTrue(any("查看职位" in w for w in unfetched["warnings"]))
+
+        # 2. “现场调研 / 深入业务现场”正常业务词不误杀为驻场岗
+        rc2, field_ok = _run_cli(
+            self._base_flags()
+            + [
+                "screen-basic",
+                "--company",
+                "广汽能源",
+                "--title",
+                "AI 产品经理（产品定义方向）",
+                "--jd",
+                "深入业务现场开展现场调研，负责产品规划与项目落地",
+                "--source",
+                "inbound",
+            ]
+        )
+        self.assertEqual(rc2, 0)
+        self.assertTrue(field_ok["pass_basic"])
+        self.assertFalse(field_ok["is_onsite"])
+        self.assertFalse(field_ok["ui_jd_unfetched"])
+
 
 if __name__ == "__main__":
     unittest.main()
