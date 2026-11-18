@@ -78,7 +78,7 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    ```
    - 用户调整过的策略可同步传入：`--remote-bigtech-flex true|false`、`--salary-panel-tolerance true|false`、`--outsourcing-policy ...`、`--onsite-policy ...`、`--headhunter-policy ...`、`--blocked-companies "..."`、`--exclude-keywords "..."`、`--inbound-resume-policy generous|strict`。
 3. 将用户确认后的《个人求职事实与答法档案》写入 `config show` 返回的 `profile_facts_file`。
-4. **线上附件简历对齐**（`execution_mode=browser` 且有线上附件时）：核对 BOSS「附件简历」栏精确文件名并通过 `config set --patch-json` 写入 `resume_routes`；`copilot` 模式口头确认即可。
+4. **线上附件简历对齐与公开文件名把关**（`execution_mode=browser` 且有线上附件时）：核对 BOSS「附件简历」栏精确文件名并通过 `config set --patch-json` 写入 `resume_routes`；**若发现线上 PDF 文件名带有“XX版 / B端版 / 兜底 / 过渡”等内部备注字眼（发送后招聘方直接可见卡片文件名），主动提醒用户重命名为干净自然的岗位抬头（如 `姓名-AI产品经理.pdf`）**；`copilot` 模式口头确认即可。
 5. **【硬性闭环】建档收尾必出初始看板 + `1/2/3` 下一步行动菜单（严禁建完档停步冷场！）**：
    - 写入 `profile_facts_file` 后，**必须在同一回复回合内立即运行 `hiremate.py build-dashboard`** 生成初始本地看板（不要等用户手动索要）；
    - **绝不允许只回复“已为你完成本地建档”就停下**！必须在回复末尾原样或等价输出 `init` / `build-dashboard` 返回的 `post_onboarding_guide.user_reply_menu_markdown`：
@@ -154,7 +154,7 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
 3. **Agent 语义理解主判 + 个人事实核对 + 云端确定性话术守卫（双保险闭环）**：
    - **分阶段语气、格式铁律与常识边界**：
      - **初次接洽 vs 后续交流**：首回陌生 HR/猎头来信适度客气得体（缺 JD 时礼貌询问具体岗位职责与业务方向）；已建联进入业务经验交流后脱去客套寒暄，回归自然平实的同行正常对话（通常 15～85 字，面对 HR 偏重硬性匹配度，面对业务直招偏重实战闭环）；对方已读未回时严禁二次催促；
-     - **纯文本防露馅**：聊天回复必须是连贯口语纯文本，**严禁包含 `**加粗**`、反引号等 Markdown 符号或 `1. 2.` 分点编号列表**；
+     - **纯文本防露馅 & 严禁外泄多版简历底牌**：聊天回复必须是连贯口语纯文本，**严禁包含 `**加粗**`、反引号等 Markdown 符号或 `1. 2.` 分点编号列表**；**多版简历路由纯属后台静默选文件动作，文字中统一简称为“简历 / 附件简历”，绝对禁止说出“XX版简历 / 方向简历”或播报 `.pdf` 文件名（当面暴露准备了多套定制简历会直接引发招聘方戒心），发前自检杜绝错别字**；
      - **前期允许询问 vs 严禁询问**：当岗位是否属于**外包/派遣/OD 或驻场/外派**存疑且用户排斥此类岗位时，允许在前期礼貌确认；但**前期严禁主动盘问薪资结构/几薪、能否涨薪、社保公积金如何缴纳、上下班打卡/加班/年假补贴或前任离职/裁员八卦**；
    - **先由你（宿主 Agent）结合完整上下文做语义判断与 `profile_facts.md` 事实核对**：
      - 档案明确有记载（包括常规在职/离职状态与标准交接到岗周期，如“在职，offer 后 2-4 周到岗”）→ 拟定第一人称自然短句草稿；
@@ -175,8 +175,8 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - **草稿违规修正（`reply_approved: false`）**：按 `violations` 修正后重新过一遍 `guard-reply`，通过后再按 `mode_reply`（`semi` 推给用户确认或写入备注 / `auto` 直接填入聊天框发送）执行。
 4. **线上多版附件简历精准投递、社交分寸与四态拆账**：
    - 双方产生实质互动后先记 `connected`；**注意社交分寸**：若当前刚向对方询问“是否为外包/驻场”或“具体岗位 JD”，在对方回复确认前**暂缓递交附件简历**；
-   - **场景 A（招聘者在聊天窗发来「想要您的附件简历」卡片或口头求简历）**：确认岗位方向匹配且无外包冲突后，若 `recommended_resume` 与默认附件一致可直接点卡片「同意」，否则从工具栏「发简历」勾选 `recommended_resume` 发出，**并顺手配一句简短自然的附言**（如“好的，附件简历刚发您了，方便时看下～”），避免干巴巴只甩文件气泡。因对方已主动求简历，发出后即可记为 `resume_delivered`（传 `--resume-used "<文件名>"`）；
-   - **场景 B（沟通顺畅主动递交简历）**：点击工具栏「发简历」勾选 `recommended_resume` 发出请求并配简短礼貌附言，此时对方尚未点同意，**只许记为 `resume_requested`**！待后续巡检看到聊天框出现「对方已接收/同意你的附件简历」系统提示后，再执行 `ledger transition --job-id <id> --status resume_delivered --resume-used "<文件名>"`。
+   - **场景 A（招聘者在聊天窗发来「想要您的附件简历」卡片或口头求简历）**：确认岗位方向匹配且无外包冲突后，若 `recommended_resume` 与默认附件一致可直接点卡片「同意」，否则从工具栏「发简历」**静默勾选** `recommended_resume` 发出，**并顺手配一句简短自然的附言**（如“好的，附件简历刚发您了，方便时看下～”——**切记严禁写成“XX版简历发您”或带出文件名**），避免干巴巴只甩文件气泡。因对方已主动求简历，发出后即可记为 `resume_delivered`（传 `--resume-used "<文件名>"`）；
+   - **场景 B（沟通顺畅主动递交简历）**：点击工具栏「发简历」静默勾选 `recommended_resume` 发出请求并配简短礼貌附言（同样只称“简历 / 附件简历”，禁提版本号与文件名），此时对方尚未点同意，**只许记为 `resume_requested`**！待后续巡检看到聊天框出现「对方已接收/同意你的附件简历」系统提示后，再执行 `ledger transition --job-id <id> --status resume_delivered --resume-used "<文件名>"`。
 5. **收尾解锁**：若本轮顺带执行了到期的主动找岗（`discover_due: true`），完成后运行 `pro mark-discovered`；最后务必运行 `pro mark-idle`。
 
 ### 6. 刷新本地转化漏斗看板、导出原生 Excel 台账与一键自动更新

@@ -79,7 +79,7 @@ python3 ~/.hiremate/skill/hiremate/hiremate.py auth status
 拿到简历内容（本地文件或在线简历）后：
 1. **先输出精简清晰的《求职建档与 8 项筛选策略确认单》**（含提炼的《个人求职事实与答法档案》摘要、自动识别的前东家名单、以及上述 **全部 8 项筛选策略的当前设定值**），明确请用户确认或指出要修改的项（**未经展示确认，严禁直接静默调 `init` 把默认策略偷偷落盘**）；
 2. 用户点头确认（或按用户意见调整对应参数）后，运行 `hiremate.py init --employers "<全部前东家>" --roles "..." --cities "..." --min-salary-k ... --resume-source <attachment_pdf|online_only|both>`（附带用户修改的策略参数），并将确认后的档案写入 `profile_facts_file`；
-3. 有浏览器权限时核对 BOSS 右上角本人姓名（`--account-name`）与线上「附件简历」精确文件名（写入 `resume_routes`）；副驾驶模式下口头询问确认即可。
+3. 有浏览器权限时核对 BOSS 右上角本人姓名（`--account-name`）与线上「附件简历」精确文件名（写入 `resume_routes`；若线上 PDF 文件名含“XX版/B端版/兜底”等内部备注词，提醒用户重命名为干净岗位名如 `姓名-AI产品经理.pdf`）；副驾驶模式下口头询问确认即可。
 
 ## 第四步：【严禁建完档停步冷场】自动生成初始看板并给出 1/2/3 下一步行动菜单
 

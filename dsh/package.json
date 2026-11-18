@@ -1,6 +1,6 @@
 {
   "name": "hiremate-dsh",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "求职助手（hiremate）DeepSeek Harness 插件：BOSS 岗位精准匹配（拒绝海投乱投）、一岗一议消息答疑、多版简历对口路由、四态投递账本与本地静态看板。",
   "type": "module",
   "main": "./index.mjs",
