@@ -79,12 +79,12 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - 用户调整过的策略可同步传入：`--remote-bigtech-flex true|false`、`--salary-panel-tolerance true|false`、`--outsourcing-policy ...`、`--onsite-policy ...`、`--headhunter-policy ...`、`--blocked-companies "..."`、`--exclude-keywords "..."`、`--inbound-resume-policy generous|strict`。
 3. 将用户确认后的《个人求职事实与答法档案》写入 `config show` 返回的 `profile_facts_file`。
 4. **线上附件简历对齐与公开文件名把关**（`execution_mode=browser` 且有线上附件时）：核对 BOSS「附件简历」栏精确文件名并通过 `config set --patch-json` 写入 `resume_routes`；**若发现线上 PDF 文件名带有“XX版 / B端版 / 兜底 / 过渡”等内部备注字眼（发送后招聘方直接可见卡片文件名），主动提醒用户重命名为干净自然的岗位抬头（如 `姓名-AI产品经理.pdf`）**；`copilot` 模式口头确认即可。
-5. **【硬性闭环】建档收尾必出初始看板 + `1/2/3` 下一步行动菜单（严禁建完档停步冷场！）**：
-   - 写入 `profile_facts_file` 后，**必须在同一回复回合内立即运行 `hiremate.py build-dashboard`** 生成初始本地看板（不要等用户手动索要）；
-   - **绝不允许只回复“已为你完成本地建档”就停下**！必须在回复末尾原样或等价输出 `init` / `build-dashboard` 返回的 `post_onboarding_guide.user_reply_menu_markdown`：
-     - **免费版 + 浏览器直连**：让用户**直接回复 `1`（推荐）**立即去 BOSS 跑第一轮搜岗深筛与半自动破冰预览（承诺未经确认绝不点发送），回复 `2` 粘贴单条岗位 JD / HR 消息参谋，回复 `3` 查看本地看板或微调条件；
+5. **【硬性闭环】建档收尾必弹开初始可视化看板 + 独立卡片隆重介绍 + `1/2/3` 下一步行动菜单（严禁停步冷场或把看板缩成不起眼小链接！）**：
+   - 写入 `profile_facts_file` 后，**必须在同一回复回合内立即运行 `hiremate.py build-dashboard --open`** 生成并自动在系统默认浏览器为用户弹开初始本地可视化求职看板（若沙盒拦截使 `browser_opened: false` 且有可见有头浏览器，可顺手在新标签打开）；
+   - **【严禁把招聘看板只塞成一个不起眼的小超链接一笔带过！】** 必须在回复正文中原样或等价输出 `post_onboarding_guide.user_reply_menu_markdown` 中的**独立 `### 📊 你的专属「本地可视化求职看板」已就绪！` 介绍区块**，向用户主动讲明看板包含 **6 维实时投递转化漏斗**、**约面/谈薪红线置顶提醒**、**外包与前东家排雷全量搜索台账** 及 **8 项策略与简历路由总览**（提示随时可点击 `file://` 链接、说「打开求职看板」或在 DSH 输入 `/hiremate-dashboard` 一键弹开），紧接着展示 `1 / 2 / 3` 行动菜单：
+     - **免费版 + 浏览器直连**：让用户**直接回复 `1`（推荐）**立即去 BOSS 跑第一轮搜岗深筛与半自动破冰预览（承诺未经确认绝不点发送），回复 `2` 粘贴单条岗位 JD / HR 消息参谋，回复 `3` 打开可视化求职看板或微调条件；
      - **免费版 / Pro + `copilot` 粘贴模式**：引导直接把第一条岗位 JD 贴进来试跑排雷与破冰草稿（`1`），或粘贴 HR 消息拟回复（`2`），或开启浏览器自动直连（`3`）；
-     - **Pro 买断版 + 浏览器直连**：引导跑首轮 Pro 深度评估 + 未读检查（`1`）、一键挂载「场景 4」工作时间自动巡检定时任务（`2`）、或调整 `semi`/`auto` 档位（`3`）；
+     - **Pro 买断版 + 浏览器直连**：引导跑首轮 Pro 深度评估 + 未读检查（`1`）、一键挂载「场景 4」工作时间自动巡检定时任务（`2`）、或调整 `semi`/`auto` 档位与查看 Pro 看板（`3`）；
    - 一旦用户回复 `1`（或表示“开始搜岗 / 跑第一轮”），立即进入下方「场景 3：BOSS 单轮搜岗深筛与三维防撞车」执行！
 
 ### 2. 免验证码设备配对与 ¥69 买断解锁 Pro（「登录求职助手」/「开通 Pro」/「我买好 Pro 了」）
@@ -104,7 +104,7 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
      1. **向用户清晰报喜已解锁的 5 项 Pro 专属高级能力**：① 100+ 深度外包名录 + 社区动态排雷池；② 主动找岗与消息答疑「全自动模式（`auto`）」解锁；③ 真人感短句答疑守卫；④ 多版线上 PDF 简历按岗自动路由；⑤ 工作时间自动匹配投递回复 + 约面/谈薪/加微信桌面弹窗停手保护（支持 2 台电脑通用）。
      2. **未建档新用户（`onboarding_completed: false`）**：展示完上述 5 项权益后，紧接着在同一回复中进入「场景 1」核对简历与 8 项筛选策略！
      3. **已建档用户（`onboarding_completed: true`）**：必须**主动挑明当前「主动找岗（`mode_discover`）」与「消息答疑（`mode_reply`）」仍处于免费版默认的【半自动确认（`semi`）】状态**，并向用户给出 `1 / 2 / 3 / 4` 选择菜单：
-        - **回复 `1`（省心全托管）**：把「主动找岗 + 消息答疑」双双切为**全自动（`auto`）**并挂载「场景 4」工作时间自动巡检（切换前先做简短风控确认，用户点头后带 `--ack-auto-risk` 运行 `config set --mode-discover auto --mode-reply auto --ack-auto-risk`）；
+        - **回复 `1`（省心全托管）**：把「主动找岗 + 消息答疑」双双切为**全自动（`auto`）**并挂载「场景 4」工作时间自动巡检（切换前先做简短风控确认，用户点头后带 `--ack-auto-risk` 运行 `config set --mode-discover auto --mode-reply auto --ack-auto-risk`，确认返回 `ok: true` 且 `dashboard_refreshed: true`，切勿漏带 `--ack-auto-risk` 导致仍停留在 `semi`）；
         - **回复 `2`（稳妥半托管）**：找岗保留半自动审阅，仅把「消息答疑」切为**全自动（`auto`）**并开启工作日巡检；
         - **回复 `3`（先试跑一轮）**：暂保持半自动，立即用 Pro 100+ 深度排雷库去 BOSS 跑一轮搜岗 + 检查未读消息；
         - **回复 `4`（多版简历路由）**：核对并配置多份线上 PDF 附件简历按岗位关键词自动匹配规则。
@@ -135,6 +135,7 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - **初次破冰语气与对象区分（适度客气 + 纯文本真人感）**：刚开始打招呼时保持得体礼貌（如以“您好，看咱们在招……”自然起头，温和邀聊；不生硬自报姓名、不用“贵司/尊敬的”公文腔、**严禁出现 `**加粗**` 等 Markdown 符号或 `1. 2.` 分点列表**）。结合抓取到的 `recruiter_title` 微调侧重点——面对 **HR / 招聘专员**简明对齐年限、行业与目标方向硬指标；面对 **业务负责人 / VP / 总监直招**则直接点出 1～2 个解决过的核心业务闭环与落地指标。企业与用工性质优先通过页面职位详情和公司主页静默核查（注意区分“现场调研 / 深入业务现场”等正常产品研发词，切勿误判为驻场外派；常规社招与知名企业默认不主动盘问“是否与 XX 直签 / 劳动合同主体”）；**严禁在前期询问薪资结构/几薪、涨薪、社保缴纳、考勤打卡加班或前任离职/裁员八卦**。对方未回复前**严禁二次追问刷屏**（如“在吗”）。
    - **半自动审阅档（`mode_discover=semi` 或免费版）**：将通过深筛的候选以 `status="discovered"` 存入 `ledger upsert-job`，在对话输出精简审阅单（序号、岗位+薪资、公司规模与自研性质、招聘者姓名及职务头衔、核心匹配点、潜在缺口、拟发 1–2 句第一人称破冰短句）。用户回复序号后，回到浏览器点击对应岗位的「立即沟通」并发送破冰短句，确认消息出现在会话框后执行 `ledger transition --job-id <id> --status opening_sent`。
    - **Pro 全自动定额档（`mode_discover=auto`）**：**开跑前必须先调用一次 `pro patrol-gate` 核验 `discover_due` 与当日剩余配额**（若处于夜间宵禁、90 分钟冷却期内或已满 `max_per_day=20` 上限，严禁强行自动打招呼，降级输出 `semi` 候选审阅单）；确认放行后，对 `strong_match` 岗位直接点击「立即沟通」发送 1–2 句得体破冰短句，每成功送达 1 个立即记账 `opening_sent`；**一旦确认送达满本轮配额（默认 5 个）立即停手**，并执行 `pro mark-discovered` 记录找岗冷却时间戳。
+   - **【搜岗收尾必推可视化看板】**：每轮搜岗结束汇报时，必须在回复末尾附上独立的 **`📊 可视化求职看板已实时同步`** 提示块（点明本轮评估与拦截的外包/前东家明细已记入 6 维漏斗台账，附上可点击 `file://` 链接与 `/hiremate-dashboard` 快捷命令；若为用户首轮产生真实岗位入库，顺手跑一次 `build-dashboard --open` 自动弹开有真实数据的看板！）。
 
 ### 4. 开启工作时间自动巡检（挂载宿主原生定时任务 · Pro 专属）
 当已解锁 Pro 的用户提出「开启自动巡检」「帮我挂上工作日定时盯盘」时，**不要自己写死循环 `sleep`**，而是直接调用当前宿主的原生定时任务机制挂载：
@@ -180,11 +181,11 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - **场景 B（沟通顺畅主动递交简历）**：点击工具栏「发简历」静默勾选 `recommended_resume` 发出请求并配简短礼貌附言（同样只称“简历 / 附件简历”，禁提版本号与文件名），此时对方尚未点同意，**只许记为 `resume_requested`**！待后续巡检看到聊天框出现「对方已接收/同意你的附件简历」系统提示后，再执行 `ledger transition --job-id <id> --status resume_delivered --resume-used "<文件名>"`。
 5. **收尾解锁**：若本轮顺带执行了到期的主动找岗（`discover_due: true`），完成后运行 `pro mark-discovered`；最后务必运行 `pro mark-idle`。
 
-### 6. 刷新本地转化漏斗看板、导出原生 Excel 台账与一键自动更新
-随时可运行以下命令为用户生成本地高密度静态复盘看板、导出原生 `.xlsx` / `.csv` 表格，或一键从 Gitee 主源（GitHub 自动备源）无损升级至最新版本：
+### 6. 打开本地可视化漏斗看板、导出原生 Excel 台账与一键自动更新
+当用户想查看投递看板、复盘排雷台账时，**一律传入 `--open` 直接在浏览器弹开看板网页**（严禁只回一行干巴巴的路径或把看板藏成不起眼的小链接），也可导出原生 `.xlsx` / `.csv` 表格或一键无损升级：
 
 ```bash
-python3 "<SKILL_DIR>/hiremate.py" build-dashboard
+python3 "<SKILL_DIR>/hiremate.py" build-dashboard --open
 python3 "<SKILL_DIR>/hiremate.py" ledger export-excel --out "<导出路径.xlsx>"
 python3 "<SKILL_DIR>/hiremate.py" ledger export-csv --out "<导出路径.csv>"
 python3 "<SKILL_DIR>/hiremate.py" update

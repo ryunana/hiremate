@@ -837,10 +837,18 @@ console.log(JSON.stringify({{ skills, commands }}));
         self.assertIn("跑第一轮搜岗深筛预览", chk_free_guide["post_onboarding_guide"]["user_reply_menu_markdown"])
 
         dash_ego = self.root / "ego-lite-dash.html"
-        _, dash_empty_res = _run_cli(flags + ["build-dashboard", "--out", str(dash_ego)])
+        _, dash_empty_res = _run_cli(flags + ["build-dashboard", "--open", "--out", str(dash_ego)])
         self.assertEqual(dash_empty_res["tier"], "free")
         self.assertTrue(dash_empty_res.get("first_run_empty"))
+        self.assertIn("file_url", dash_empty_res)
+        self.assertTrue(str(dash_empty_res["file_url"]).startswith("file://"))
+        # 测试环境下 HIREMATE_NO_BROWSER=1，验证 --open 正常走完不报错且返回 dashboard_spotlight 独立推介卡片
+        self.assertIs(dash_empty_res.get("browser_opened"), False)
+        self.assertIn("dashboard_spotlight", dash_empty_res)
+        self.assertIn("本地可视化求职看板", dash_empty_res["dashboard_spotlight"]["markdown"])
+        self.assertIn("6 维实时投递转化漏斗", dash_empty_res["dashboard_spotlight"]["markdown"])
         self.assertIn("post_onboarding_guide", dash_empty_res)
+        self.assertIn("本地可视化求职看板", dash_empty_res["post_onboarding_guide"]["user_reply_menu_markdown"])
         ego_html = dash_ego.read_text(encoding="utf-8")
         self.assertIn("ego lite", ego_html)
         # 验证免费版看板包含直接可点击的 Pro 购买跳转链接与功能对比链接
@@ -926,6 +934,13 @@ console.log(JSON.stringify({{ skills, commands }}));
             self.assertTrue(auto_ok["ok"])
             self.assertEqual(auto_ok["config"]["mode_discover"], "auto")
             self.assertEqual(auto_ok["config"]["mode_reply"], "auto")
+            self.assertTrue(auto_ok.get("dashboard_refreshed"))
+            ws_dash_html = Path(auto_ok["dashboard_path"]).read_text(encoding="utf-8")
+            self.assertIn("找岗：全自动 / 答疑：全自动", ws_dash_html)
+            self.assertIn("全自动找岗已开启 · 冷却/超额暂存候选", ws_dash_html)
+            self.assertIn("全自动定额破冰（已开启）", ws_dash_html)
+            self.assertIn("全自动守卫答疑（已开启）", ws_dash_html)
+            self.assertNotIn("半自动待确认破冰候选", ws_dash_html)
 
     def test_audit_hardening_employer_aliases_force_preserve_auto_confirm_and_fail_closed(self) -> None:
         from http.server import BaseHTTPRequestHandler, HTTPServer

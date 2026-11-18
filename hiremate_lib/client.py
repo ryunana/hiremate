@@ -256,6 +256,31 @@ def open_browser_url(url: str) -> bool:
         return False
 
 
+def open_local_html_file(html_path: Path) -> bool:
+    """在本地桌面环境自动拉起系统默认浏览器打开本地静态看板（dashboard.html）。"""
+    if os.environ.get("HIREMATE_NO_BROWSER") == "1":
+        return False
+    try:
+        resolved = html_path.expanduser().resolve()
+        if not resolved.is_file() or resolved.suffix.lower() != ".html":
+            return False
+        if sys.platform == "darwin":
+            res = subprocess.run(
+                ["open", str(resolved)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            return res.returncode == 0
+        if sys.platform.startswith("win"):
+            os.startfile(str(resolved))  # type: ignore[attr-defined]
+            return True
+        return bool(webbrowser.open(resolved.as_uri(), new=2))
+    except Exception:
+        return False
+
+
 class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
     """防止重定向至明文 HTTP 或异源主机时泄露 Authorization Bearer Token。"""
 

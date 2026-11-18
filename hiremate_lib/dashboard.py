@@ -735,12 +735,31 @@ def render_dashboard_html(
 
     past_emps_for_guide = config.get("past_employers") or []
     is_copilot_mode = str(config.get("execution_mode", "browser")) == "copilot"
-    first_search_cmd = (
-        "帮我评估下面这个 BOSS 岗位靠不靠谱（排外包+核对前东家+看匹配缺口），并拟一句真人感打招呼短句："
-        if is_copilot_mode
-        else "帮我在 BOSS 直聘按当前求职档案跑第一轮搜岗深筛预览（先出破冰审阅单给我确认，未经确认别点发送）"
-    )
-    second_reply_cmd = "帮我对照个人履历档案拟定下面这条 HR 追问的真人感回复，并记入求职台账："
+    pro_auto_discover = (not is_copilot_mode) and is_pro and str(config.get("mode_discover", "semi")) == "auto"
+    if is_copilot_mode:
+        first_search_cmd = "帮我评估下面这个 BOSS 岗位靠不靠谱（排外包+核对前东家+看匹配缺口），并拟一句真人感打招呼短句："
+        step1_title = "粘贴首个岗位试跑排雷"
+        step1_desc = "直接把看中的岗位 JD 发给助手，立即体验前东家防撞、外包识别与破冰话术草稿。"
+    elif pro_auto_discover:
+        first_search_cmd = "帮我在 BOSS 直聘按当前 Pro 全自动策略跑第一轮定额搜岗破冰并检查未读消息"
+        step1_title = "跑首轮 Pro 全自动定额搜岗 + 未读检查"
+        step1_desc = "自动在已登录浏览器筛除伪装外包与前东家，对强匹配自研岗直接定额发送破冰短句（每轮≤5岗）并处理未读消息。"
+    else:
+        first_search_cmd = "帮我在 BOSS 直聘按当前求职档案跑第一轮搜岗深筛预览（先出破冰审阅单给我确认，未经确认别点发送）"
+        step1_title = "去 BOSS 跑首轮搜岗深筛预览"
+        step1_desc = "自动在已登录浏览器按你的条件筛出 3～5 个靠谱自研岗，先出审阅单给你过目，绝不乱发。"
+
+    if pro_auto_discover:
+        second_reply_cmd = "帮我挂载求职助手工作日工作时间自动巡检定时任务"
+        step2_title = "方式 2 · 一键挂载工作日工作时间自动巡检"
+        step2_desc = "周一至周五 09:00–12:00、14:00–18:00 定时自动盯未读消息与定额找岗，遇到约面/谈薪立即桌面弹窗提醒本人接管。"
+        step2_btn = "复制巡检口令"
+    else:
+        second_reply_cmd = "帮我对照个人履历档案拟定下面这条 HR 追问的真人感回复，并记入求职台账："
+        step2_title = "方式 2 · 让助手参谋 HR 追问消息并记账"
+        step2_desc = "把 HR 发来的问题贴给助手，严格按你真实履历拟 1～2 句自然回复，拒绝 AI 官腔与胡编。"
+        step2_btn = "复制参谋口令"
+
     onboarding_launchpad_html = ""
     if not jobs:
         onboarding_launchpad_html = f"""
@@ -756,19 +775,19 @@ def render_dashboard_html(
           </div>
           <div class="launchpad-grid">
             <div class="launchpad-step">
-              <div class="launchpad-step-title">方式 1（推荐）· {"粘贴首个岗位试跑排雷" if is_copilot_mode else "去 BOSS 跑首轮搜岗深筛预览"}</div>
-              <p class="launchpad-step-desc">{"直接把看中的岗位 JD 发给助手，立即体验前东家防撞、外包识别与破冰话术草稿。" if is_copilot_mode else "自动在已登录浏览器按你的条件筛出 3～5 个靠谱自研岗，先出审阅单给你过目，绝不乱发。"}</p>
+              <div class="launchpad-step-title">方式 1（推荐）· {step1_title}</div>
+              <p class="launchpad-step-desc">{step1_desc}</p>
               <div class="launchpad-cmd-bar">
                 <code>{_esc(first_search_cmd)}</code>
                 <button type="button" class="copy-action-btn" data-copy="{_esc(first_search_cmd)}" data-done-label="✓ 已复制，切回 AI 粘贴发送">复制口令开跑</button>
               </div>
             </div>
             <div class="launchpad-step">
-              <div class="launchpad-step-title">方式 2 · 让助手参谋 HR 追问消息并记账</div>
-              <p class="launchpad-step-desc">把 HR 发来的问题贴给助手，严格按你真实履历拟 1～2 句自然回复，拒绝 AI 官腔与胡编。</p>
+              <div class="launchpad-step-title">{step2_title}</div>
+              <p class="launchpad-step-desc">{step2_desc}</p>
               <div class="launchpad-cmd-bar">
                 <code>{_esc(second_reply_cmd)}</code>
-                <button type="button" class="copy-action-btn secondary" data-copy="{_esc(second_reply_cmd)}" data-done-label="✓ 已复制">复制参谋口令</button>
+                <button type="button" class="copy-action-btn secondary" data-copy="{_esc(second_reply_cmd)}" data-done-label="✓ 已复制">{step2_btn}</button>
               </div>
             </div>
           </div>
@@ -788,15 +807,25 @@ def render_dashboard_html(
             '⚡ 前往开通 Pro 全托管（特惠 ¥69 · 原价 ¥99 · 一次买断无月费） →</a>'
             '</div>'
         )
+    is_auto_discover = (tier_cls != "badge-free") and str(config.get("mode_discover", "semi")) == "auto"
+    is_auto_reply = (tier_cls != "badge-free") and str(config.get("mode_reply", "semi")) == "auto"
     discovered_html = (
         "\n".join(_render_job_card(j, highlight_icebreaker=True) for j in discovered_jobs)
         if discovered_jobs
-        else '<div class="empty-box">当前暂无半自动待确认候选岗位（复制上方口令发给桌面 AI 即可生成首轮候选审阅单）。</div>'
+        else (
+            f'<div class="empty-box">当前已开启<strong>主动找岗：全自动模式</strong>{"与<strong>消息答疑：全自动模式</strong>" if is_auto_reply else ""}——强匹配自研岗将在配额内直接发起沟通并记入「开场已送达」，无需逐条手动确认（仅冷却期或满当日配额时暂存于此）。</div>'
+            if is_auto_discover
+            else '<div class="empty-box">当前暂无半自动待确认候选岗位（复制上方口令发给桌面 AI 即可生成首轮候选审阅单）。</div>'
+        )
     )
     all_jobs_html = (
         "\n".join(_render_job_card(j, highlight_icebreaker=(j.get("status") == "discovered")) for j in jobs)
         if jobs
-        else '<div class="empty-box">本地账本暂无岗位记录。回到桌面 AI 发送「帮我在 BOSS 跑第一轮搜岗深筛预览」后自动入库生成。</div>'
+        else (
+            '<div class="empty-box">本地账本暂无岗位记录。回到桌面 AI 启动首轮全自动搜岗或开启定时巡检后自动入库生成。</div>'
+            if is_auto_discover
+            else '<div class="empty-box">本地账本暂无岗位记录。回到桌面 AI 发送「帮我在 BOSS 跑第一轮搜岗深筛预览」后自动入库生成。</div>'
+        )
     )
 
     # 筛选胶囊
@@ -2054,7 +2083,7 @@ def render_dashboard_html(
       <div class="kpi-card kpi-highlight">
         <span class="kpi-label">待本人约面/决策</span>
         <div class="kpi-value">{int(funnel.get("handed_off_pending", 0))}</div>
-        <span class="kpi-sub">待确认破冰候选 {int(funnel.get("discovered_pending", 0))}</span>
+        <span class="kpi-sub">{f"冷却/超额暂存候选 {int(funnel.get('discovered_pending', 0))}" if is_auto_discover else f"待确认破冰候选 {int(funnel.get('discovered_pending', 0))}"}</span>
       </div>
     </section>
 
@@ -2085,8 +2114,8 @@ def render_dashboard_html(
 
         <div class="section-block">
           <div class="section-header">
-            <h2 class="section-title">半自动待确认破冰候选（{len(discovered_jobs)}）</h2>
-            <span class="section-hint">已在详情页与公司主页完成初筛，在宿主对话中回复序号即可发起沟通</span>
+            <h2 class="section-title">{f"全自动找岗已开启 · 冷却/超额暂存候选（{len(discovered_jobs)}）" if is_auto_discover else f"半自动待确认破冰候选（{len(discovered_jobs)}）"}</h2>
+            <span class="section-hint">{"强匹配岗位已在配额内直接自动发送破冰语；仅夜间宵禁、冷却期或满当日上限时暂存于此" if is_auto_discover else "已在详情页与公司主页完成初筛，在宿主对话中回复序号即可发起沟通"}</span>
           </div>
           <div class="cards-stack">
             {discovered_html}
@@ -2121,8 +2150,8 @@ def render_dashboard_html(
             <div class="kv-list">
               <div class="kv-item"><span class="kv-key">交互运行模式</span><span class="kv-val">{"副驾驶粘贴协同（无浏览器操控权限兜底）" if str(config.get("execution_mode", "browser")) == "copilot" else ("浏览器直连自动化 · ego lite（省 Token 持久化窗口）" if str(config.get("browser_provider", "auto")) == "ego_lite" else ("浏览器直连自动化 · 宿主自带 Browser Use（有头持久化）" if str(config.get("browser_provider", "auto")) == "builtin_browser_use" else "浏览器直连自动化（复用已登录窗口）"))}</span></div>
               <div class="kv-item"><span class="kv-key">简历底座形态</span><span class="kv-val">{"暂无简历（请先准备本地简历或填写平台在线简历）" if str(config.get("resume_source", "")) == "none" else ("待导入简历（请拖入 PDF 或授权读取平台在线简历）" if str(config.get("resume_source", "")) == "pending" else ("仅平台在线简历（建议在 BOSS 在线简历页生成附件 PDF）" if (str(config.get("resume_source", "")) == "online_only" or not bool(config.get("has_attachment_resume", True))) else "平台在线 + PDF 附件简历齐全"))}</span></div>
-              <div class="kv-item"><span class="kv-key">主动找岗模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_discover", "semi")))) if is_pro else "半自动确认（全自动破冰需 Pro）"}</span></div>
-              <div class="kv-item"><span class="kv-key">消息答疑模式</span><span class="kv-val">{_esc(_mode_cn(str(config.get("mode_reply", "semi")))) if is_pro else "未启用（Pro 解锁半自动/全自动答疑）"}</span></div>
+              <div class="kv-item"><span class="kv-key">主动找岗模式</span><span class="kv-val">{_esc("全自动定额破冰（已开启）" if str(config.get("mode_discover", "semi")) == "auto" else "半自动审阅确认") if is_pro else "半自动确认（全自动破冰需 Pro）"}</span></div>
+              <div class="kv-item"><span class="kv-key">消息答疑模式</span><span class="kv-val">{_esc("全自动守卫答疑（已开启）" if str(config.get("mode_reply", "semi")) == "auto" else "半自动草稿确认") if is_pro else "未启用（Pro 解锁半自动/全自动答疑）"}</span></div>
               <div class="kv-item"><span class="kv-key">自动巡检时间窗</span><span class="kv-val">{(_esc("仅工作日 " if sched.get("weekdays_only", True) else "每日 ") + _esc(windows_text)) if is_pro else "未启用（Pro 解锁工作时间自动巡检）"}</span></div>
               <div class="kv-item"><span class="kv-key">轮次最小间隔</span><span class="kv-val">{f"{int(sched.get('min_interval_minutes', 90))} 分钟" if is_pro else "手动触发单轮"}</span></div>
               <div class="kv-item"><span class="kv-key">单轮 / 单日沟通上限</span><span class="kv-val">每轮 {int(sched.get("max_per_round", 5))} 岗 / 每日 {int(sched.get("max_per_day", 20))} 岗</span></div>

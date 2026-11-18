@@ -103,6 +103,41 @@ def _maybe_refresh_pro_dashboard(ws: Path, home: Path, auth_res: dict[str, Any])
         pass
 
 
+def _sync_local_dashboard_best_effort(
+    ws: Path,
+    home: Path,
+    *,
+    only_if_exists: bool = False,
+) -> str | None:
+    """纯本地零网络开销重绘静态 dashboard.html，确保改配置或记账后浏览器刷新即见最新档位与台账。"""
+    dash_file = ws / "dashboard.html"
+    if only_if_exists and not dash_file.is_file():
+        return None
+    if not only_if_exists and not (workspace.config_path(ws).is_file() or dash_file.is_file()):
+        return None
+    try:
+        creds = client.load_credentials(home)
+        tier = "pro" if (creds and creds.get("tier") == "pro") else "free"
+        pro_meta: dict[str, Any] = {}
+        if tier == "pro" and creds:
+            pro_meta = {
+                "email": creds.get("email"),
+                "lifetime": bool(creds.get("lifetime", creds.get("days_left") is None)),
+                "days_left": creds.get("days_left"),
+                "expires_at": creds.get("expires_at"),
+            }
+        cached_upd = updater.build_update_notice_from_state(updater.load_update_state(home))
+        dash = dashboard.build_dashboard_file(
+            workspace=ws,
+            tier=tier,
+            pro_meta=pro_meta,
+            update_notice=cached_upd,
+        )
+        return str(dash.get("out_path") or "")
+    except Exception:
+        return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="hiremate",
@@ -380,6 +415,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 7. build-dashboard
     p_dash = sub.add_parser("build-dashboard", help="构建本地高信息密度只读静态求职看板 HTML")
     p_dash.add_argument("--out", help="输出 HTML 文件路径（默认 <workspace>/dashboard.html）")
+    p_dash.add_argument("--open", dest="open_browser", action="store_true", help="生成后自动在系统默认浏览器打开看板页面")
     p_dash.add_argument("--demo", action="store_true", help="使用虚构样例数据构建演示看板（不读取个人隐私）")
     p_dash.add_argument(
         "--demo-tier",
@@ -608,18 +644,22 @@ def main(argv: list[str] | None = None) -> int:
                 creds_now = client.load_credentials(home)
                 tier_now = "pro" if (creds_now and creds_now.get("tier") == "pro") else "free"
                 ob_now = workspace.inspect_onboarding_status(ws, saved)
+                refreshed_dash = _sync_local_dashboard_best_effort(ws, home)
                 out_payload: dict[str, Any] = {
                     "ok": True,
                     "config": saved,
                     "strategy_confirmation": workspace.build_strategy_confirmation_summary(saved, tier=tier_now),
                 }
+                if refreshed_dash:
+                    out_payload["dashboard_refreshed"] = True
+                    out_payload["dashboard_path"] = refreshed_dash
                 if auto_downgrade_note:
                     out_payload["notice"] = auto_downgrade_note
                 if ob_now["onboarding_completed"] or saved.get("target_roles"):
                     out_payload["post_onboarding_guide"] = workspace.build_post_onboarding_guide(
                         saved,
                         tier=tier_now,
-                        dashboard_path=str((ws / "dashboard.html").resolve()),
+                        dashboard_path=refreshed_dash or str((ws / "dashboard.html").resolve()),
                     )
                 _emit(out_payload)
                 return 0
@@ -631,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
                     from_file=args.from_file,
                     from_text=args.from_text,
                 )
+                _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
                 _emit(res)
                 return 0
 
@@ -667,23 +708,25 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if args.led_cmd == "upsert-job":
                 job_data = _load_json_arg(args.job_json)
-                _emit(led.upsert_job(job_data))
+                up_out = led.upsert_job(job_data)
+                _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
+                _emit(up_out)
                 return 0
             if args.led_cmd == "transition":
                 if not (args.job_id or "").strip() and not (args.company or "").strip():
                     raise ValueError("ledger transition 必须传入 --job-id，或传入 --company（及可选 --title）自动定位/建档流转")
-                _emit(
-                    led.transition(
-                        job_id=args.job_id,
-                        to_status=args.status,
-                        company=args.company,
-                        title=args.title,
-                        channel=args.channel,
-                        note=args.note,
-                        resume_used=args.resume_used,
-                        notify_desktop=not bool(args.no_notify),
-                    )
+                tr_out = led.transition(
+                    job_id=args.job_id,
+                    to_status=args.status,
+                    company=args.company,
+                    title=args.title,
+                    channel=args.channel,
+                    note=args.note,
+                    resume_used=args.resume_used,
+                    notify_desktop=not bool(args.no_notify),
                 )
+                _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
+                _emit(tr_out)
                 return 0
             if args.led_cmd == "list":
                 items = led.list_jobs(status=args.status, search=args.search, limit=args.limit)
@@ -846,6 +889,21 @@ def main(argv: list[str] | None = None) -> int:
                 demo_tier=args.demo_tier,
                 pro_meta=pro_meta,
                 update_notice=passive_notice,
+            )
+            dash_out_file = Path(str(res.get("out_path") or "")).expanduser().resolve()
+            try:
+                res["file_url"] = dash_out_file.as_uri()
+            except ValueError:
+                res["file_url"] = str(dash_out_file)
+            opened_now = False
+            if args.open_browser and dash_out_file.is_file():
+                opened_now = client.open_local_html_file(dash_out_file)
+                res["browser_opened"] = opened_now
+            res["dashboard_spotlight"] = workspace.build_dashboard_spotlight(
+                dash_out_file,
+                tier=str(res.get("tier") or tier),
+                jobs_count=int(res.get("jobs_count", 0)),
+                browser_opened=opened_now,
             )
             if not args.demo and res.get("jobs_count", 0) == 0:
                 cfg_now = workspace.load_config(ws)

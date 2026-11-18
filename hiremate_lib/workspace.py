@@ -883,6 +883,45 @@ def build_strategy_confirmation_summary(
     }
 
 
+def build_dashboard_spotlight(
+    dashboard_path: str | Path | None,
+    *,
+    tier: str = "free",
+    jobs_count: int | None = None,
+    browser_opened: bool = False,
+) -> dict[str, Any]:
+    """生成高辨识度的「本地可视化求职看板」独立展示卡片，防止 Agent 只塞一个不起眼超链接导致用户忽略看板功能。"""
+    resolved_str = str(Path(dashboard_path).expanduser().resolve()) if dashboard_path else ""
+    file_url = ""
+    if resolved_str:
+        try:
+            file_url = Path(resolved_str).as_uri()
+        except ValueError:
+            file_url = resolved_str
+
+    tier_tag = "Pro 全托管视图" if tier == "pro" else "纯本地隐私台账"
+    count_tag = f" · 当前共 {jobs_count} 条记录" if jobs_count is not None else ""
+    opened_tag = "（已在默认浏览器为你自动打开）" if browser_opened else ""
+    link_part = (
+        f"[点击在浏览器打开求职看板]({file_url})（本地文件：`{resolved_str}`；DeepSeek Harness 随时输入 `/hiremate-dashboard` 一键弹开）"
+        if file_url
+        else "对助手说「打开求职看板」（DeepSeek Harness 输入 `/hiremate-dashboard`）即可一键弹开"
+    )
+
+    lines = [
+        f"### 📊 你的专属「本地可视化求职看板」已就绪{opened_tag}！（{tier_tag}{count_tag}）",
+        f"- 👉 **立即打开看板**：{link_part}",
+        "- **一眼看清全局进展**：内置 **6 维实时投递转化漏斗**（已评估 → 外包/前东家排雷跳过 → 破冰送达 → 双方建联 → PDF 简历送达 → 待本人约面决策）",
+        "- **三大交互视图**：① **待办置顶队列**（约面/谈薪/加微信红线会话高亮置顶 + 待确认候选） ｜ ② **全量岗位台账**（支持搜公司/筛状态，每家被拦外包均有留痕） ｜ ③ **策略与简历路由总览**（8 项规则与多版简历绑定一目了然）",
+    ]
+    return {
+        "dashboard_path": resolved_str,
+        "file_url": file_url,
+        "browser_opened": browser_opened,
+        "markdown": "\n".join(lines),
+    }
+
+
 def build_pro_activation_guide(
     workspace: Path,
     cfg: dict[str, Any] | None = None,
@@ -898,6 +937,7 @@ def build_pro_activation_guide(
     mode_r = str(effective_cfg.get("mode_reply") or "semi")
     still_semi = mode_d == "semi" or mode_r == "semi"
     dash_file = dashboard_path or str((workspace / "dashboard.html").resolve())
+    dash_spot = build_dashboard_spotlight(dash_file, tier="pro")
     acct_tag = f"{email} · {validity_desc}" if email else validity_desc
 
     unlocked_benefits = [
@@ -917,12 +957,12 @@ def build_pro_activation_guide(
             "**你已解锁全部 5 项 Pro 专属高级权益**：",
             "- ✅ **100+ 深度外包与社区动态排雷池** ｜ ✅ **找岗与消息答疑「全自动模式」** ｜ ✅ **真人短句答疑守卫** ｜ ✅ **多版 PDF 简历按岗自动路由** ｜ ✅ **工作时间自动匹配投递回复 + 约面桌面弹窗提醒**（支持 2 台电脑通用）",
             "",
-            "📋 **下一步（5 分钟完成建档即可开启全自动托管）**：",
-            "- 请直接把你的 **PDF/Word 简历拖进对话**（或让我去读取你的 BOSS 在线简历），我们核对完 **8 项筛选策略** 后，就能直接为你开启**全自动找岗/答疑模式**并挂上工作日自动巡检！",
+            "📋 **下一步（5 分钟完成建档即可生成专属可视化求职看板并开启全自动托管）**：",
+            "- 请直接把你的 **PDF/Word 简历拖进对话**（或让我去读取你的 BOSS 在线简历），我们核对完 **8 项筛选策略** 后，就能自动为你弹开**本地可视化求职看板**、开启**全自动找岗/答疑模式**并挂上工作日自动巡检！",
         ]
         must_do = [
             "1. 【严禁只说一句登录成功就停下】必须先向用户完整报喜展示上方 `unlocked_benefits` 5 项已解锁的 Pro 高级能力；",
-            "2. 紧接着在同一条回复中展示《启动准备核对单》与 8 项默认筛选策略，引导用户提供简历完成建档，并告知建完档即可一键切换全自动模式与工作日定时巡检。",
+            "2. 紧接着在同一条回复中展示《启动准备核对单》与 8 项默认筛选策略，引导用户提供简历完成建档，并告知建完档即可生成可视化求职看板与开启全自动巡检。",
         ]
     else:
         semi_notice = (
@@ -932,12 +972,14 @@ def build_pro_activation_guide(
         )
         md_lines = [
             f"### 🎉 Pro 全托管版已激活生效（{acct_tag}）！",
-            "**已为你本机解锁 5 项 Pro 高级功能**（本地求职看板已同步升级为 Pro 视图）：",
+            "**已为你本机解锁 5 项 Pro 高级功能**：",
             "1. **100+ 深度外包名录 + 社区动态排雷池**：穿透公司主页识破伪装外包、派遣与驻场岗",
             "2. **全自动找岗 & 全自动答疑模式解锁**：支持定额自动破冰（每轮≤5岗）与自动回复跟进",
             "3. **真人感短句答疑守卫**：严格对照你的本地真实履历自然接话，绝不瞎编经历",
             "4. **多版线上 PDF 简历自动路由**：手里有多份方向简历时自动按岗匹配投递",
             "5. **工作时间自动匹配投递回复 + 约面弹窗停手**：聊到约面时间/要微信/谈薪资自动停手弹窗叫你（支持 2 台电脑同时使用）",
+            "",
+            dash_spot["markdown"],
             "",
             semi_notice,
             "",
@@ -945,10 +987,10 @@ def build_pro_activation_guide(
             "1. **【推荐 · 省心全托管】把「主动找岗 + 消息答疑」双双切换为全自动（`auto`），并挂载工作日自动巡检** *(周一至周五 09:00–12:00、14:00–18:00 自动盯盘，开启前向你确认一次防风控护栏)*",
             "2. **【稳妥半托管】找岗保留「半自动审阅」，仅把「消息答疑」切为全自动（`auto`）+ 开启工作日自动巡检** *(打招呼由你挑，后续追问与递简历全自动)*",
             "3. **【先跑一轮体验】暂保持半自动，立即用 Pro 100+ 深度排雷库去 BOSS 筛一轮岗位 + 检查未读消息**",
-            f"4. **【配置多版简历路由 / 查看 Pro 看板】** *(若有 2 份以上线上附件简历，告诉我文件名与对应方向即可绑定；Pro 看板：`{dash_file}`)*",
+            "4. **【配置多版简历路由】** *(若有 2 份以上线上附件简历，告诉我文件名与对应方向即可绑定自动路由)*",
         ]
         must_do = [
-            "1. 【严禁绑定后冷场停步】必须向用户完整展示已解锁的 5 项 Pro 权益，并明确指出当前「主动找岗」与「消息答疑」仍处于半自动（semi），现已可切换为全自动（auto）；",
+            "1. 【严禁绑定后冷场停步或漏讲求职看板】必须向用户完整展示已解锁的 5 项 Pro 权益与独立的「📊 本地可视化求职看板」入口区块，并明确指出当前「主动找岗」与「消息答疑」若仍处于半自动（semi），现已可切换为全自动（auto）；",
             "2. 必须在回复末尾展示上方 `user_reply_menu_markdown` 的 1 / 2 / 3 / 4 选择菜单；若用户回复 1 或 2 要求切 `auto`，先做简短平台风控确认提示，用户点头后带 `--ack-auto-risk` 运行 `config set` 并挂载宿主工作日定时巡检。",
         ]
 
@@ -963,6 +1005,8 @@ def build_pro_activation_guide(
         },
         "still_in_semi_mode": still_semi,
         "dashboard_path": dash_file,
+        "dashboard_url": dash_spot["file_url"],
+        "dashboard_spotlight_markdown": dash_spot["markdown"],
         "unlocked_benefits": unlocked_benefits,
         "agent_must_do": must_do,
         "user_reply_menu_markdown": "\n".join(md_lines),
@@ -975,14 +1019,15 @@ def build_post_onboarding_guide(
     tier: str = "free",
     dashboard_path: str | None = None,
 ) -> dict[str, Any]:
-    """构建建档完成后的强制下一步引导（供 Agent 直接展示给用户，杜绝建完档停步冷场）。"""
+    """构建建档完成后的强制下一步引导（供 Agent 直接展示给用户，杜绝建完档停步冷场或漏推求职看板）。"""
     exec_mode = str(cfg.get("execution_mode") or "browser")
     b_prov = str(cfg.get("browser_provider") or "auto")
     roles = " / ".join(cfg.get("target_roles") or []) or "目标岗位"
     cities = " / ".join(cfg.get("preferred_cities") or []) or "不限城市"
     min_k = int(cfg.get("min_salary_k", 20) or 20)
     shield_cnt = len(cfg.get("past_employers") or [])
-    dash_note = f"（本地看板路径：`{dashboard_path}`）" if dashboard_path else ""
+    dash_spot = build_dashboard_spotlight(dashboard_path, tier=tier)
+    dash_note = f"（看板直达：{dash_spot['file_url'] or dashboard_path}）" if dashboard_path else ""
 
     if exec_mode == "copilot":
         recommended_action = "paste_first_jd_or_enable_browser"
@@ -1005,9 +1050,11 @@ def build_post_onboarding_guide(
             },
         ]
         menu_lines = [
+            dash_spot["markdown"],
+            "",
             "### 🚀 本地建档已完成！接下来直接这样开始（回复数字或直接发内容即可）：",
             f"- **回复 `1` 或直接把岗位 JD 贴进来（推荐）**：我立即替你做外包/前东家排雷、分析匹配点与缺口，并拟好破冰短句供你复制发送",
-            "- **回复 `2` 或粘贴 HR 消息**：对照你的真实履历拟定 1～2 句自然回复草稿，并同步记入本地台账",
+            "- **回复 `2` 或粘贴 HR 消息**：对照你的真实履历拟定 1～2 句自然回复草稿，并同步记入本地台账与求职看板",
             f"- **回复 `3`**：开启浏览器自动直连模式（免手动粘贴，直接去 BOSS 替你刷 `{roles}` 列表深筛）{dash_note}",
         ]
     elif tier == "pro":
@@ -1030,15 +1077,17 @@ def build_post_onboarding_guide(
             },
             {
                 "key": "3",
-                "label": "切换半自动 / 全自动档位或查看本地求职看板",
-                "detail": f"当前可分别设定「主动找岗」与「消息答疑」为半自动确认（semi）或全自动托管（auto）{dash_note}",
+                "label": "切换半自动 / 全自动档位或打开可视化求职看板",
+                "detail": f"当前可分别设定「主动找岗」与「消息答疑」为半自动确认（semi）或全自动托管（auto），并在浏览器查看 Pro 漏斗看板{dash_note}",
             },
         ]
         menu_lines = [
+            dash_spot["markdown"],
+            "",
             "### 🚀 Pro 求职档案已就绪！回复数字直接开工：",
             f"1. **【推荐】立即跑首轮 BOSS 深度搜岗 + 未读消息检查** — 按 `{roles}`（`{cities}` · `{min_k}K+`）穿透筛除 100+ 伪装外包并避开 {shield_cnt} 家前东家",
             "2. **一键开启工作时间自动巡检** — 挂载周一至周五工作时间定时巡检，主动匹配投递、自动回复递简历，到约面弹窗喊你",
-            f"3. **调整半自动/全自动档位 或 打开本地看板**{dash_note}",
+            f"3. **调整半自动/全自动档位 或 在浏览器打开可视化求职看板**{dash_note}",
         ]
     else:
         recommended_action = "run_free_first_round_boss_preview"
@@ -1060,15 +1109,17 @@ def build_post_onboarding_guide(
             },
             {
                 "key": "3",
-                "label": "打开本地求职看板 / 微调筛选偏好",
-                "detail": f"查看刚生成的静态看板{dash_note}，或随时一句话修改薪资、城市、外包/驻场开关",
+                "label": "在浏览器打开可视化求职看板 / 微调筛选偏好",
+                "detail": f"打开本地静态漏斗看板查看实时队列与排雷台账{dash_note}，或随时一句话修改薪资、城市、外包/驻场开关",
             },
         ]
         menu_lines = [
+            dash_spot["markdown"],
+            "",
             "### 🚀 本地建档已完成！接下来想怎么试跑？（直接回数字 `1` 即可开始）",
             f"1. **【推荐】立即去 BOSS 跑第一轮搜岗深筛预览** — 按 `{roles}`（`{cities}` · `{min_k}K+`）筛出 3～5 个靠谱自研岗、自动避开 {shield_cnt} 家前东家与外包，**先出破冰话术审阅单给你过目，未经你确认绝不点发送**",
-            "2. **粘贴单条岗位 JD 或 HR 消息让我参谋** — 替你排雷、挑匹配亮点、拟 1～2 句真人感回复草稿并记入本地台账",
-            f"3. **查看本地求职看板 / 微调筛选条件** — 随时调整薪资、城市、外包/驻场接受度{dash_note}",
+            "2. **粘贴单条岗位 JD 或 HR 消息让我参谋** — 替你排雷、挑匹配亮点、拟 1～2 句真人感回复草稿并同步记入本地看板台账",
+            f"3. **在浏览器打开可视化求职看板 / 微调筛选条件** — 查看 6 维漏斗、待办队列与排雷记录，或随时调整筛选偏好{dash_note}",
         ]
 
     return {
@@ -1076,10 +1127,14 @@ def build_post_onboarding_guide(
         "execution_mode": exec_mode,
         "browser_provider": b_prov,
         "recommended_action": recommended_action,
+        "dashboard_path": dash_spot["dashboard_path"],
+        "dashboard_url": dash_spot["file_url"],
+        "dashboard_spotlight_markdown": dash_spot["markdown"],
         "agent_must_do": [
-            "1. 若尚未将确认后的个人求职事实写入 profile_facts_path，请立即写入，并顺手运行一次 `hiremate.py build-dashboard` 生成初始静态看板；",
-            "2. 【职位筛选策略全透明确认】若刚才尚未向用户完整展示全部 8 项筛选策略（异地大厂弹性、面板薪资容忍度、外包/驻场/猎头三项策略、前东家与排除词、求简历策略），必须在本次回复中把 `strategy_confirmation.markdown` 列给用户过目并询问是否要修改（严禁藏在看板里让用户自己翻才发现）；",
-            "3. 【严禁建完档停步冷场】必须在同一条回复末尾向用户清晰展示下方 `user_reply_menu_markdown` 的 1 / 2 / 3 下一步操作菜单，让用户直接回一个 `1` 就能开跑首轮实战。",
+            "1. 若尚未将确认后的个人求职事实写入 profile_facts_path，请立即写入，并运行 `hiremate.py build-dashboard --open` 生成并自动在用户浏览器打开初始求职看板；",
+            "2. 【严禁把求职看板仅缩成一个不起眼的超链接！】必须在回复中完整展示上方独立的「📊 你的专属『本地可视化求职看板』已就绪！」介绍卡片，向用户讲清看板里的 6 维转化漏斗、约面置顶队列、外包/前东家排雷台账与策略总览（DSH 提醒随时可输 `/hiremate-dashboard` 一键弹开）；",
+            "3. 【职位筛选策略全透明确认】若刚才尚未向用户完整展示全部 8 项筛选策略，必须在本次回复中把 `strategy_confirmation.markdown` 列给用户过目并询问是否要修改；",
+            "4. 【严禁建完档停步冷场】必须在同一条回复末尾向用户清晰展示下方 `user_reply_menu_markdown` 的 1 / 2 / 3 下一步操作菜单，让用户直接回一个 `1` 就能开跑首轮实战。",
         ],
         "options": options,
         "user_reply_menu_markdown": "\n".join(menu_lines),

@@ -163,7 +163,11 @@ export function apply(ctx) {
               if (updateLine) lines.push(updateLine)
               if (onboardLine) lines.push(onboardLine)
               if (proUpgradeHint) lines.push(proUpgradeHint)
-              lines.push(prefLine, `投递漏斗：${funnelLine}`)
+              lines.push(
+                prefLine,
+                `投递漏斗：${funnelLine}`,
+                '📊 可视化求职看板：输入 /hiremate-dashboard 一键在浏览器弹开（含 6 维转化漏斗、约面置顶队列与外包排雷全量台账）',
+              )
               return { kind: 'success', text: lines.join('\n') }
             } catch (err) {
               return { kind: 'error', text: `读取求职助手状态失败：${err?.message || err}` }
@@ -219,13 +223,18 @@ export function apply(ctx) {
 
         disposers.push(cmdCtx.commands.register({
           name: 'hiremate-dashboard',
-          description: '一键生成并刷新本地只读静态求职投递看板（dashboard.html）',
+          description: '一键在浏览器打开并刷新本地可视化求职投递看板（dashboard.html）',
           handler: async () => {
             try {
-              const res = await runHiremateCli(skillDir, ['build-dashboard'])
+              const res = await runHiremateCli(skillDir, ['build-dashboard', '--open'])
+              const openedNote = res?.browser_opened
+                ? '已在系统默认浏览器为你自动打开！'
+                : '已刷新生成！（若未自动弹出浏览器，请直接点击下方链接打开）'
               const outLines = [
-                `已刷新本地求职投递看板（${res.tier === 'pro' ? 'Pro 专业版视角' : '免费基础版视角'}，共 ${res.jobs_count} 条记录）：`,
-                res.out_path,
+                `📊 本地可视化求职看板${openedNote}（${res.tier === 'pro' ? 'Pro 专业版视角' : '免费基础版视角'} · 共 ${res.jobs_count} 条记录）`,
+                `🔗 浏览器直达：${res.file_url || res.out_path}`,
+                `📂 本地路径：${res.out_path}`,
+                '💡 看板三大视图：①「待处理队列」置顶约面/谈薪接管提醒与候选岗位 ｜ ②「全量岗位账本」搜索筛选全部投递与外包/前东家排雷记录 ｜ ③「当前求职策略」核对自动化档位与多版简历路由',
               ]
               if (res?.update_notice?.update_available) {
                 outLines.push(`🚀 发现新版本 v${res.update_notice.latest_version}，输入 /hiremate-update 可一键自动升级。`)
