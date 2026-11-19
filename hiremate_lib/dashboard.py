@@ -9,7 +9,14 @@ from typing import Any
 
 from . import __version__
 from .ledger import STATUS_LABELS, VALID_STATUSES, JobLedger
-from .workspace import DEFAULT_API_BASE, atomic_write_text, get_effective_api_base, load_config, profile_facts_path
+from .workspace import (
+    DEFAULT_API_BASE,
+    atomic_write_text,
+    get_effective_api_base,
+    load_config,
+    profile_facts_path,
+    salary_mode_short_cn,
+)
 
 DECISION_MAKER_KEYWORDS = ("vp", "总监", "负责人", "合伙人", "总经理", "ceo", "cto", "创始人", "主管", "leader", "专家")
 
@@ -2162,7 +2169,7 @@ def render_dashboard_html(
           <div class="strategy-card">
             <h3>精准匹配与渠道过滤策略</h3>
             <div class="kv-list">
-              <div class="kv-item"><span class="kv-key">期望最低月薪</span><span class="kv-val">{int(config.get("min_salary_k", 0))}K{("（容忍面板标薪略低）" if config.get("salary_panel_tolerance", True) else "（严格卡线）")}</span></div>
+              <div class="kv-item"><span class="kv-key">期望最低月薪</span><span class="kv-val">{int(config.get("min_salary_k", 0))}K（{_esc(salary_mode_short_cn(config))}）</span></div>
               <div class="kv-item"><span class="kv-key">外包 / 派遣 / OD 策略</span><span class="kv-val">{_esc(_outsourcing_cn(config, is_pro=is_pro))}</span></div>
               <div class="kv-item"><span class="kv-key">驻场 / 外派办公策略</span><span class="kv-val">{_esc(_onsite_cn(config))}</span></div>
               <div class="kv-item"><span class="kv-key">猎头渠道策略</span><span class="kv-val">{_esc(_headhunter_cn(str(config.get("headhunter_policy", "inbound_only")))) if is_pro else "主动检索跳过猎头（来信非对称核验需 Pro）"}</span></div>

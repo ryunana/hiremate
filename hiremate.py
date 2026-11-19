@@ -170,6 +170,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("true", "false"),
         help="面板标薪容忍度开关（默认 true=容忍面板标薪略低约20%%先聊，false=严格卡死底薪）",
     )
+    p_init.add_argument(
+        "--salary-match-mode",
+        choices=workspace.VALID_SALARY_MATCH_MODES,
+        help="薪资区间匹配口径：ceiling_tolerant（默认，看上限且容忍略低）/ ceiling_strict（看上限严格达标）/ floor_strict（看起薪下限严格达标，如12-18K低于15K跳过）",
+    )
     p_init.add_argument("--headhunter-policy", choices=workspace.VALID_HEADHUNTER_POLICIES, help="猎头策略：block_all / inbound_only（默认）/ allow_all")
     p_init.add_argument("--inbound-resume-policy", choices=("generous", "strict"), help="被动索要简历策略：generous（默认尽量给）/ strict（仅高匹配给）")
     p_init.add_argument(
@@ -254,6 +259,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("true", "false"),
         help="面板标薪容忍度（true=容忍标薪略低先聊，false=严格卡线）",
     )
+    p_cfg_set.add_argument(
+        "--salary-match-mode",
+        choices=workspace.VALID_SALARY_MATCH_MODES,
+        help="薪资区间匹配口径：ceiling_tolerant / ceiling_strict / floor_strict",
+    )
     p_cfg_set.add_argument("--blocked-companies", help="设置额外屏蔽企业列表（逗号分隔，前东家仍自动保留保护）")
     p_cfg_set.add_argument("--exclude-keywords", help="设置岗位排除关键词列表（逗号分隔）")
     p_cfg_set.add_argument("--headhunter-policy", choices=workspace.VALID_HEADHUNTER_POLICIES)
@@ -306,12 +316,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_emp.add_argument("--from-text", help="从文本片段自动识别公司名")
 
     # 3. screen (基础免费单轮初筛)
-    p_screen = sub.add_parser("screen-basic", help="开源基础版：本地黑名单、基础外包排雷与条件初筛")
+    p_screen = sub.add_parser("screen-basic", help="开源基础版：本地黑名单、四源地点核验、基础外包排雷与条件初筛")
     p_screen.add_argument("--company", required=True)
     p_screen.add_argument("--title", required=True)
     p_screen.add_argument("--salary", default="")
+    p_screen.add_argument("--city", default="", help="可选：BOSS 面板地点标签（如 深圳·南山区）")
+    p_screen.add_argument("--work-address", default="", help="可选：职位详情页底部的工作地址文本")
     p_screen.add_argument("--company-intro", default="", help="可选：公司主页简介文本（用于基础驻场/外包识别）")
-    p_screen.add_argument("--jd", default="", help="可选：岗位职责描述文本")
+    p_screen.add_argument("--jd", default="", help="可选：岗位职责描述文本（须确认已完全展开）")
     p_screen.add_argument("--headhunter", action="store_true")
     p_screen.add_argument("--source", choices=("outbound", "inbound"), default="outbound")
 
@@ -462,6 +474,7 @@ def main(argv: list[str] | None = None) -> int:
                 remote_bigtech_flex=(args.remote_bigtech_flex == "true") if args.remote_bigtech_flex else None,
                 min_salary_k=args.min_salary_k,
                 salary_panel_tolerance=(args.salary_panel_tolerance == "true") if args.salary_panel_tolerance else None,
+                salary_match_mode=args.salary_match_mode,
                 filter_outsourcing=(args.filter_outsourcing == "true") if args.filter_outsourcing else None,
                 outsourcing_policy=args.outsourcing_policy,
                 filter_onsite=(args.filter_onsite == "true") if args.filter_onsite else None,
@@ -558,6 +571,8 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["min_salary_k"] = args.min_salary_k
                 if args.salary_panel_tolerance:
                     cli_patch["salary_panel_tolerance"] = args.salary_panel_tolerance == "true"
+                if args.salary_match_mode:
+                    cli_patch["salary_match_mode"] = args.salary_match_mode
                 if args.blocked_companies is not None:
                     cli_patch["blocked_companies"] = _split_csv(args.blocked_companies)
                 if args.exclude_keywords is not None:
@@ -682,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
                 company=args.company,
                 title=args.title,
                 salary_text=args.salary,
+                city=args.city,
+                work_address=args.work_address,
                 company_intro=args.company_intro,
                 jd_text=args.jd,
                 is_headhunter=args.headhunter,

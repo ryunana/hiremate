@@ -2002,6 +2002,144 @@ console.log(JSON.stringify({{ skills, commands }}));
         self.assertFalse(field_ok["is_onsite"])
         self.assertFalse(field_ok["ui_jd_unfetched"])
 
+    def test_screen_basic_four_source_location_conflict_and_jd_truncation(self) -> None:
+        flags = ["--workspace", str(self.ws), "--home", str(self.home)]
+        _run_cli(
+            flags
+            + [
+                "init",
+                "--roles",
+                "AI产品经理,产品经理",
+                "--cities",
+                "深圳",
+                "--min-salary-k",
+                "20",
+            ]
+        )
+
+        # 1. 真实翻车案例：鸣鸣很忙集团——地点标签和工作地址都写深圳，但标题写了 base 长沙 -> 必须判定地点矛盾并拦截
+        rc1, out_conflict = _run_cli(
+            flags
+            + [
+                "screen-basic",
+                "--company",
+                "鸣鸣很忙集团",
+                "--title",
+                "AI产品经理（base长沙）",
+                "--salary",
+                "25-35K",
+                "--city",
+                "深圳·南山区",
+                "--work-address",
+                "深圳市南山区科技园",
+                "--jd",
+                "负责零售AI产品规划与落地。",
+            ]
+        )
+        self.assertEqual(rc1, 0)
+        self.assertFalse(out_conflict["pass_basic"])
+        self.assertTrue(out_conflict["location_mismatch"])
+        self.assertTrue(out_conflict["location_conflict"])
+        self.assertTrue(any("长沙" in r and "矛盾" in r for r in out_conflict["blocked_reasons"]))
+
+        # 2. JD 正文显式写明工作地/常驻在非优先城市 -> 拦截
+        rc2, out_jd_loc = _run_cli(
+            flags
+            + [
+                "screen-basic",
+                "--company",
+                "某零售科技公司",
+                "--title",
+                "高级产品经理",
+                "--salary",
+                "25-35K",
+                "--city",
+                "深圳",
+                "--jd",
+                "负责核心中台建设。\n工作地点：长沙市岳麓区\n要求5年以上经验。",
+            ]
+        )
+        self.assertEqual(rc2, 0)
+        self.assertFalse(out_jd_loc["pass_basic"])
+        self.assertTrue(out_jd_loc["location_mismatch"])
+        self.assertTrue(out_jd_loc["location_conflict"])
+
+        # 3. 多城可选（含优先城市）与正常业务区域/偶尔出差描述 -> 不误杀
+        rc3, out_multi_ok = _run_cli(
+            flags
+            + [
+                "screen-basic",
+                "--company",
+                "某自研科技公司",
+                "--title",
+                "AI产品经理（base 深圳/长沙）",
+                "--salary",
+                "25-35K",
+                "--city",
+                "深圳",
+                "--jd",
+                "负责北京、上海大客户数字化解决方案，需偶尔出差长沙调研客户需求。",
+            ]
+        )
+        self.assertEqual(rc3, 0)
+        self.assertTrue(out_multi_ok["pass_basic"])
+        self.assertFalse(out_multi_ok["location_mismatch"])
+        self.assertFalse(out_multi_ok["jd_truncated_suspected"])
+
+        # 4. 长 JD 末尾疑似折叠收起（展开全部 / 省略号截断）-> 给出 jd_truncated_suspected 预警
+        rc4, out_trunc = _run_cli(
+            flags
+            + [
+                "screen-basic",
+                "--company",
+                "某自研科技公司",
+                "--title",
+                "AI产品经理",
+                "--salary",
+                "25-35K",
+                "--city",
+                "深圳",
+                "--jd",
+                "1. 负责大模型产品架构设计与核心指标优化；2. 协同算法团队推进落...展开全部",
+            ]
+        )
+        self.assertEqual(rc4, 0)
+        self.assertTrue(out_trunc["jd_truncated_suspected"])
+        self.assertTrue(any("折叠" in w or "展开" in w for w in out_trunc["warnings"]))
+
+        # 5. 省级优先城市（广东省）放行广州、拦截长沙
+        _run_cli(flags + ["config", "set", "--cities", "广东省"])
+        _, out_gd_ok = _run_cli(
+            flags
+            + [
+                "screen-basic",
+                "--company",
+                "某广州科技公司",
+                "--title",
+                "产品经理（base广州）",
+                "--salary",
+                "25-35K",
+                "--city",
+                "广州",
+            ]
+        )
+        self.assertTrue(out_gd_ok["pass_basic"])
+        _, out_gd_block = _run_cli(
+            flags
+            + [
+                "screen-basic",
+                "--company",
+                "某湖南科技公司",
+                "--title",
+                "产品经理（base长沙）",
+                "--salary",
+                "25-35K",
+                "--city",
+                "深圳",
+            ]
+        )
+        self.assertFalse(out_gd_block["pass_basic"])
+
 
 if __name__ == "__main__":
     unittest.main()

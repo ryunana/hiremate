@@ -12,11 +12,15 @@ from pathlib import Path
 from typing import Any
 
 from .normalize import (
+    analyze_job_location_signals,
     companies_match,
     deduplicate_company_list,
     detect_basic_work_mode_risks,
+    detect_jd_truncation_risk,
     employer_shield_match,
     extract_employers_from_text,
+    has_pua_obfuscation,
+    parse_salary_bounds_k,
     parse_salary_floor_k,
     read_resume_text_best_effort,
 )
@@ -29,6 +33,7 @@ VALID_RESUME_SOURCES = ("pending", "attachment_pdf", "online_only", "both", "non
 VALID_CHANNEL_POLICIES = ("block_all", "inbound_only", "allow_all")
 VALID_HEADHUNTER_POLICIES = VALID_CHANNEL_POLICIES
 VALID_INBOUND_RESUME_POLICIES = ("generous", "strict")
+VALID_SALARY_MATCH_MODES = ("ceiling_tolerant", "ceiling_strict", "floor_strict")
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 PROFILE_TEMPLATE_PATH = PACKAGE_ROOT / "templates" / "profile_facts.md"
@@ -48,6 +53,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "remote_bigtech_flex": True,
     "min_salary_k": 20,
     "salary_panel_tolerance": True,
+    "salary_match_mode": "ceiling_tolerant",
     "filter_outsourcing": True,
     "outsourcing_policy": "block_all",
     "filter_onsite": True,
@@ -161,13 +167,52 @@ def _resolve_policy_and_flag(
     return (default_policy, default_policy == "block_all")
 
 
+def _resolve_salary_mode_and_tolerance(raw_cfg: dict[str, Any]) -> tuple[str, bool]:
+    """解析三档薪资区间匹配口径，并与旧版 salary_panel_tolerance 布尔字段保持双向兼容。"""
+    has_mode = "salary_match_mode" in raw_cfg and raw_cfg["salary_match_mode"] is not None
+    has_tol = "salary_panel_tolerance" in raw_cfg and raw_cfg["salary_panel_tolerance"] is not None
+
+    if has_mode:
+        mode = str(raw_cfg["salary_match_mode"]).strip()
+        if mode not in VALID_SALARY_MATCH_MODES:
+            raise ValueError(
+                f"salary_match_mode 仅支持 {VALID_SALARY_MATCH_MODES}，收到: {raw_cfg['salary_match_mode']!r}"
+            )
+        return (mode, mode == "ceiling_tolerant")
+
+    if has_tol:
+        tol = bool(raw_cfg["salary_panel_tolerance"])
+        return ("ceiling_tolerant" if tol else "ceiling_strict", tol)
+
+    return ("ceiling_tolerant", True)
+
+
+def salary_mode_short_cn(cfg: dict[str, Any]) -> str:
+    """返回紧凑的薪资区间口径中文短标签（用于状态栏、Checklist 与看板）。"""
+    mode = str(cfg.get("salary_match_mode") or "").strip()
+    if mode == "floor_strict":
+        return "看下限·严格卡起薪"
+    if mode == "ceiling_strict" or not bool(cfg.get("salary_panel_tolerance", True)):
+        return "看上限·严格卡死底薪"
+    return "看上限·容忍面板标薪略低"
+
+
 def apply_config_updates(cfg: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
-    """增量合并配置字典，确保布尔过滤开关与三态渠道策略保持双向同步。"""
+    """增量合并配置字典，确保布尔过滤开关与三态渠道/薪资策略保持双向同步。"""
     for key, val in patch.items():
         if key == "schedule" and isinstance(val, dict) and isinstance(cfg.get("schedule"), dict):
             cfg["schedule"].update(val)
         else:
             cfg[key] = val
+
+    if "salary_match_mode" in patch and patch["salary_match_mode"] is not None:
+        smode = str(patch["salary_match_mode"]).strip()
+        cfg["salary_match_mode"] = smode
+        cfg["salary_panel_tolerance"] = smode == "ceiling_tolerant"
+    elif "salary_panel_tolerance" in patch and patch["salary_panel_tolerance"] is not None:
+        stol = bool(patch["salary_panel_tolerance"])
+        cfg["salary_panel_tolerance"] = stol
+        cfg["salary_match_mode"] = "ceiling_tolerant" if stol else "ceiling_strict"
 
     if "outsourcing_policy" in patch and patch["outsourcing_policy"] is not None:
         pol = str(patch["outsourcing_policy"]).strip()
@@ -284,9 +329,11 @@ def validate_and_normalize_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["onsite_policy"] = onsite_pol
     cfg["filter_onsite"] = onsite_flag
 
+    sal_mode, sal_tol = _resolve_salary_mode_and_tolerance(raw_cfg)
+    cfg["salary_match_mode"] = sal_mode
+    cfg["salary_panel_tolerance"] = sal_tol
     cfg["min_salary_k"] = max(0, int(cfg.get("min_salary_k", 20)))
     cfg["remote_bigtech_flex"] = bool(cfg.get("remote_bigtech_flex", True))
-    cfg["salary_panel_tolerance"] = bool(cfg.get("salary_panel_tolerance", True))
     cfg["auto_risk_acknowledged"] = bool(cfg.get("auto_risk_acknowledged", False))
 
     cfg["target_roles"] = deduplicate_company_list(cfg.get("target_roles") or [])
@@ -676,23 +723,22 @@ def build_startup_checklist(
         pref_summary = (
             f"方向：{'/'.join(roles)} ｜ 城市：{'/'.join(cities) or '不限'}"
             f"{'（异地大厂可谈）' if effective_cfg.get('remote_bigtech_flex', True) else '（严格限所选城市）'} ｜ "
-            f"底薪：{effective_cfg.get('min_salary_k', 20)}K+"
-            f"{'（容忍面板标薪略低）' if effective_cfg.get('salary_panel_tolerance', True) else '（严格卡线）'} ｜ "
+            f"底薪：{effective_cfg.get('min_salary_k', 20)}K+（{salary_mode_short_cn(effective_cfg)}） ｜ "
             f"外包：{pol_cn.get(out_pol, out_pol)} ｜ 驻场：{pol_cn.get(onsite_pol, onsite_pol)} ｜ "
             f"猎头：{pol_cn.get(str(effective_cfg.get('headhunter_policy', 'inbound_only')), '仅接来信')} ｜ "
             f"已拉黑前东家：{len(emps)} 家"
         )
-        pref_action = f"当前版本：{tier_cn}；上述每一项筛选策略均可随时一句话修改。"
+        pref_action = f"当前版本：{tier_cn}；上述每一项筛选策略均可随时一句话或通过选项卡片修改。"
     else:
         pref_status = "pending"
         pref_icon = "⬜"
         pref_summary = (
-            "【必经用户确认】请将全部 8 项职位筛选默认策略完整列给用户确认是否修改（严禁静默套用默认值）"
+            "【必经用户逐项选择确认】请优先调用宿主原生选项控件（带推荐项）让用户逐项确认筛选策略（严禁静默套用默认值）"
         )
         pref_action = (
-            f"当前版本：{tier_cn}；建档落盘前必须向用户逐项确认：目标岗位、城市+异地大厂弹性（默认开启）、"
-            f"底薪+面板标薪容忍度（默认开启）、外包策略（默认[{pol_cn.get(out_pol)}]）、驻场策略（默认[{pol_cn.get(onsite_pol)}]）、"
-            f"猎头策略（默认[仅接被动来信]）、前东家屏蔽+额外拉黑企业+排除词、被动求简历策略（默认[尽量给]）。"
+            f"当前版本：{tier_cn}；读取简历后请优先调用宿主选项控件（如 `ask_user_question` / `request_user_input` / `AskUserQuestion` / `ask_question`）"
+            f"按 `interactive_questions` 带 `(Recommended)` 推荐项让用户逐项点选确认：目标岗位与前东家屏蔽、城市+异地大厂弹性、"
+            f"最低月薪+薪资区间口径（看上限宽松 / 看上限严格 / 看下限严格卡起薪）、外包策略、驻场策略、猎头策略与被动给简历尺度。"
         )
 
     items = [
@@ -735,6 +781,12 @@ def build_startup_checklist(
     ]
 
     strat_summary = build_strategy_confirmation_summary(effective_cfg, tier=tier)
+    interactive_qs = build_onboarding_interactive_questions(
+        effective_cfg,
+        tier=tier,
+        browser_choice_needed=(b_status == "choice_required"),
+        has_ego=has_ego,
+    )
 
     md_lines = [
         "### 📋 求职助手 · 启动准备核对单（Checklist）",
@@ -764,6 +816,7 @@ def build_startup_checklist(
         "has_attachment_resume": ob["has_attachment_resume"],
         "items": items,
         "strategy_confirmation": strat_summary,
+        "interactive_questions": interactive_qs,
         "markdown": "\n".join(md_lines),
     }
     if ob["onboarding_completed"]:
@@ -773,6 +826,281 @@ def build_startup_checklist(
             dashboard_path=str((workspace / "dashboard.html").resolve()),
         )
     return res_chk
+
+
+def build_onboarding_interactive_questions(
+    cfg: dict[str, Any],
+    *,
+    tier: str = "free",
+    browser_choice_needed: bool = False,
+    has_ego: bool = False,
+) -> dict[str, Any]:
+    """构建面向各宿主原生选项控件（ask_user_question / request_user_input / AskUserQuestion / ask_question）
+    的分步交互式策略选择蓝图，每题首项均标注 `(Recommended)` 推荐值并支持自定义输入微调。
+    """
+    min_k = int(cfg.get("min_salary_k", 20) or 20)
+    roles_preview = "、".join(cfg.get("target_roles") or []) or "从简历提炼的目标岗位"
+    cities_preview = "、".join(cfg.get("preferred_cities") or []) or "简历意向城市"
+    emps_preview = "、".join(cfg.get("past_employers") or []) or "简历中的全部过往雇主"
+
+    browser_question: dict[str, Any] | None = None
+    if browser_choice_needed:
+        ego_note = "本机已装可直接用" if has_ego else "选此项将自动协助安装"
+        browser_question = {
+            "id": "browser_provider",
+            "header": "浏览器通道",
+            "question": "当前宿主自带浏览器支持有头持久化，你希望用哪种方式操作 BOSS 直聘？",
+            "cli_flags": ["--browser-provider"],
+            "current_value": str(cfg.get("browser_provider") or "auto"),
+            "options": [
+                {
+                    "label": "ego lite 省 Token 快照 (Recommended)",
+                    "value": "ego_lite",
+                    "description": f"紧凑 DOM 快照大幅节省搜岗与高频巡检 Token，独立持久化窗口防风控（{ego_note}）",
+                },
+                {
+                    "label": "宿主自带 Browser Use",
+                    "value": "builtin_browser_use",
+                    "description": "免额外安装软件开箱即用，多走视觉截图推理故 Token 消耗较高",
+                },
+            ],
+        }
+
+    batch_1: list[dict[str, Any]] = [
+        {
+            "id": "roles_and_shield",
+            "header": "方向与排雷",
+            "question": (
+                f"已提炼方向「{roles_preview}」并自动拉黑保护前东家（{emps_preview}），是否确认采用？"
+                "（如需增删岗位词、追加拉黑公司或排除词，可在自定义框直接填写）"
+            ),
+            "cli_flags": ["--roles", "--employers", "--blocked-companies", "--exclude-keywords"],
+            "current_value": "confirm_extracted",
+            "options": [
+                {
+                    "label": "确认采用提炼结果 (Recommended)",
+                    "value": "confirm_extracted",
+                    "description": "按简历提炼的岗位词精准匹配，并将全部前东家自动加入同字号防撞黑名单",
+                },
+                {
+                    "label": "微调岗位词或追加黑名单/排除词",
+                    "value": "custom_adjust",
+                    "description": "请在自定义输入框填写要修改的岗位词、想额外屏蔽的竞对企业或排除词（如电销/保险）",
+                },
+            ],
+        },
+        {
+            "id": "salary_match_mode",
+            "header": "薪资区间口径",
+            "question": (
+                f"期望最低月薪（当前按 {min_k}K，改数字可填自定义框）遇到区间标薪（如底薪15K遇 12-18K）时怎么判定？"
+            ),
+            "cli_flags": ["--min-salary-k", "--salary-match-mode"],
+            "current_value": str(cfg.get("salary_match_mode") or "ceiling_tolerant"),
+            "options": [
+                {
+                    "label": "看上限 · 宽松容忍 (Recommended)",
+                    "value": "ceiling_tolerant",
+                    "description": "区间上限达标或略低约20%都可先聊（如期望15K时 12-18K、11-13K 均可先探底，适合防漏大厂好岗）",
+                },
+                {
+                    "label": "看上限 · 严格达标",
+                    "value": "ceiling_strict",
+                    "description": "区间上限必须 ≥ 期望底薪才聊（如期望15K时，12-18K 因上限18K达标可聊，10-14K 直接跳过）",
+                },
+                {
+                    "label": "看下限 · 严格卡起薪",
+                    "value": "floor_strict",
+                    "description": "起薪下限必须 ≥ 期望底薪（如期望15K时，12-18K 因下限12K直接跳过不聊，防中小厂贴下限压薪）",
+                },
+            ],
+        },
+        {
+            "id": "remote_bigtech_flex",
+            "header": "城市与异地",
+            "question": f"优先城市（当前：{cities_preview}，改城市可填自定义框）之外，遇到异地知名大厂自研岗是否先聊？",
+            "cli_flags": ["--cities", "--remote-bigtech-flex"],
+            "current_value": "true" if bool(cfg.get("remote_bigtech_flex", True)) else "false",
+            "options": [
+                {
+                    "label": "开启异地大厂弹性 (Recommended)",
+                    "value": "true",
+                    "description": "优先匹配目标城市；遇异地知名大厂先建立沟通，进入约面前必交回本人确认异地意愿",
+                },
+                {
+                    "label": "严格仅看所选城市",
+                    "value": "false",
+                    "description": "任何工作地不在目标城市列表内的岗位一律在搜岗阶段直接跳过",
+                },
+            ],
+        },
+    ]
+
+    batch_2: list[dict[str, Any]] = [
+        {
+            "id": "outsourcing_policy",
+            "header": "外包/OD策略",
+            "question": "遇到人力外包、劳务派遣或 OD 编制岗位如何处理？",
+            "cli_flags": ["--outsourcing-policy"],
+            "current_value": str(cfg.get("outsourcing_policy") or "block_all"),
+            "options": [
+                {
+                    "label": "全部排除过滤 (Recommended)",
+                    "value": "block_all",
+                    "description": "主动搜岗与被动来信均静默过滤外包、派遣与 OD 编制岗位",
+                },
+                {
+                    "label": "主动不投 · 仅接被动来信",
+                    "value": "inbound_only",
+                    "description": "主动找岗绝不投外包，但外包招聘者主动发来消息时按方向与薪资正常评估",
+                },
+                {
+                    "label": "完全开放接受",
+                    "value": "allow_all",
+                    "description": "不限制外包或派遣编制，按岗位匹配度与薪资正常推进",
+                },
+            ],
+        },
+        {
+            "id": "onsite_policy",
+            "header": "驻场外派策略",
+            "question": "遇到需要去客户现场驻场 / 外派办公的岗位如何处理？",
+            "cli_flags": ["--onsite-policy"],
+            "current_value": str(cfg.get("onsite_policy") or "block_all"),
+            "options": [
+                {
+                    "label": "全部排除过滤 (Recommended)",
+                    "value": "block_all",
+                    "description": "穿透公司主页与 JD 排除需去甲方/行方客户现场驻场的岗位",
+                },
+                {
+                    "label": "主动不投 · 仅接被动来信",
+                    "value": "inbound_only",
+                    "description": "主动搜岗跳过驻场岗，仅保留被动来信评估",
+                },
+                {
+                    "label": "完全开放接受",
+                    "value": "allow_all",
+                    "description": "可接受客户现场驻场或外派办公项目",
+                },
+            ],
+        },
+        {
+            "id": "headhunter_policy",
+            "header": "猎头渠道",
+            "question": "对 BOSS 直聘上的猎头顾问岗位采取什么策略？",
+            "cli_flags": ["--headhunter-policy"],
+            "current_value": str(cfg.get("headhunter_policy") or "inbound_only"),
+            "options": [
+                {
+                    "label": "主动不投 · 仅接优质来信 (Recommended)",
+                    "value": "inbound_only",
+                    "description": "把每日主动打招呼名额留给企业直招；猎头主动找来且岗位对口时正常接洽",
+                },
+                {
+                    "label": "全部屏蔽猎头",
+                    "value": "block_all",
+                    "description": "主动搜岗与被动来信均忽略猎头渠道",
+                },
+                {
+                    "label": "完全开放猎头",
+                    "value": "allow_all",
+                    "description": "主动搜岗也投递猎头发布的优质高薪岗位",
+                },
+            ],
+        },
+        {
+            "id": "inbound_resume_policy",
+            "header": "给简历尺度",
+            "question": "被动沟通中 HR 或猎头索要附件简历时，给付尺度如何设置？",
+            "cli_flags": ["--inbound-resume-policy"],
+            "current_value": str(cfg.get("inbound_resume_policy") or "generous"),
+            "options": [
+                {
+                    "label": "宽松配合 · 尽量给 (Recommended)",
+                    "value": "generous",
+                    "description": "只要不在黑名单且未触发外包/驻场排雷，对方求简历即顺势配合发送",
+                },
+                {
+                    "label": "严格把关 · 高匹配才给",
+                    "value": "strict",
+                    "description": "仅当绑定职位明确命中目标方向关键词时自动给简历，其余转人工确认",
+                },
+            ],
+        },
+    ]
+
+    batches: list[dict[str, Any]] = [
+        {
+            "batch_index": 1,
+            "title": "第 1 组：岗位方向、薪资区间口径与城市弹性（3 项）",
+            "questions": batch_1,
+        },
+        {
+            "batch_index": 2,
+            "title": "第 2 组：外包/驻场排雷、猎头渠道与给简历尺度（4 项）",
+            "questions": batch_2,
+        },
+    ]
+    all_questions = list(batch_1) + list(batch_2)
+
+    if tier == "pro":
+        pro_mode_q = {
+            "id": "pro_automation_mode",
+            "header": "自动化档位",
+            "question": "Pro 全自动权限已解锁，日常找岗破冰与消息答疑希望采用哪种托管档位？（开启全自动内置每轮≤5岗、每日≤20岗及约面/谈薪停手保护）",
+            "cli_flags": ["--mode-discover", "--mode-reply", "--ack-auto-risk"],
+            "current_value": (
+                "full_auto"
+                if cfg.get("mode_discover") == "auto" and cfg.get("mode_reply") == "auto"
+                else ("reply_auto" if cfg.get("mode_reply") == "auto" else "all_semi")
+            ),
+            "options": [
+                {
+                    "label": "省心全托管 · 找岗+答疑全自动 (Recommended)",
+                    "value": "full_auto",
+                    "description": "定额自动破冰 + 自动答复常规问题递简历，遇约面/谈薪/加微信立即停手弹窗通知（选此项即确认已知悉平台自动化风控护栏）",
+                },
+                {
+                    "label": "稳妥半托管 · 找岗审阅 + 答疑全自动",
+                    "value": "reply_auto",
+                    "description": "主动打招呼前先出审阅单由你挑，已聊上的会话自动回复跟进",
+                },
+                {
+                    "label": "全程半自动确认",
+                    "value": "all_semi",
+                    "description": "主动打招呼与每条消息回复均先生成草稿由你确认后再发",
+                },
+            ],
+        }
+        batches.append(
+            {
+                "batch_index": 3,
+                "title": "第 3 组：Pro 自动化托管档位（1 项）",
+                "questions": [pro_mode_q],
+            }
+        )
+        all_questions.append(pro_mode_q)
+
+    return {
+        "preferred_tools": {
+            "dsh": "ask_user_question",
+            "workbuddy": "request_user_input",
+            "codex": "request_user_input",
+            "claude": "AskUserQuestion",
+            "antigravity": "ask_question",
+        },
+        "usage_rule": (
+            "建档确认策略时（注意：仅限建档/改配置场景，严禁在 auth login 等待网页点击授权链接时调用阻塞框），"
+            "优先调用当前宿主的原生交互式选项控件（每题首项保留 `(Recommended)` 推荐标记），让用户像填向导卡片一样逐项点选确认："
+            "支持多题同批卡片的宿主（如 DSH `ask_user_question` / Antigravity `ask_question`）可一次传入 `questions` 或按 `question_batches` 分批弹出；"
+            "单次限 3～4 题的宿主（如 WorkBuddy / Codex `request_user_input`、Claude Code `AskUserQuestion`）请按 `question_batches` 顺序分批调用；"
+            "仅当宿主无任何选项控件工具时，才退化为输出 `strategy_confirmation.markdown` 文字清单确认。"
+        ),
+        "browser_question": browser_question,
+        "questions": all_questions,
+        "question_batches": batches,
+    }
 
 
 def build_strategy_confirmation_summary(
@@ -786,11 +1114,17 @@ def build_strategy_confirmation_summary(
         "inbound_only": "主动搜岗不投 · 仅接被动来信",
         "allow_all": "完全开放接受",
     }
+    sal_mode_desc_map = {
+        "ceiling_tolerant": "看上限·宽松（容忍面板标薪略低约 20% 先聊：开启 [默认]）",
+        "ceiling_strict": "看上限·严格达标（关闭容忍，严格卡死底薪：区间上限须 ≥ 期望底薪）",
+        "floor_strict": "看下限·严格卡起薪（关闭容忍，严格卡死底薪：起薪下限须 ≥ 期望底薪，如 12-18K 低于 15K 直接跳过）",
+    }
     roles = "、".join(cfg.get("target_roles") or []) or "待从简历提炼确认"
     cities_raw = "、".join(cfg.get("preferred_cities") or []) or "不限城市"
     remote_flex = bool(cfg.get("remote_bigtech_flex", True))
     min_k = int(cfg.get("min_salary_k", 20) or 20)
-    sal_tol = bool(cfg.get("salary_panel_tolerance", True))
+    sal_mode, _ = _resolve_salary_mode_and_tolerance(cfg)
+    sal_desc = sal_mode_desc_map.get(sal_mode, sal_mode_desc_map["ceiling_tolerant"])
     out_pol = str(cfg.get("outsourcing_policy") or "block_all")
     onsite_pol = str(cfg.get("onsite_policy") or "block_all")
     hh_pol = str(cfg.get("headhunter_policy") or "inbound_only")
@@ -817,9 +1151,12 @@ def build_strategy_confirmation_summary(
         },
         {
             "key": "salary_and_tolerance",
-            "label": "期望最低月薪 & 标薪容忍度",
-            "current": f"{min_k}K+（容忍面板标薪略低约 20% 先聊：{'开启 [默认]' if sal_tol else '关闭，严格卡死底薪'}）",
-            "how_to_change": "想严格按标薪卡线可改为关闭（`--salary-panel-tolerance false`）",
+            "label": "期望最低月薪 & 区间口径",
+            "current": f"{min_k}K+（{sal_desc}）",
+            "how_to_change": (
+                "支持三档口径（`--salary-match-mode`）："
+                "`ceiling_tolerant`（看上限·宽松 [默认]）/ `ceiling_strict`（看上限·达标）/ `floor_strict`（看下限·严格卡起薪）"
+            ),
         },
         {
             "key": "outsourcing_policy",
@@ -866,10 +1203,10 @@ def build_strategy_confirmation_summary(
     ]
 
     md_lines = [
-        "### ⚙️ 职位筛选与沟通策略明细（请确认是否需要修改，满意可直接默认，想改哪项直接说）：",
+        "### ⚙️ 职位筛选与沟通策略明细（优先通过选项控件逐项点选确认，满意可直接选推荐项）：",
         f"1. **目标岗位**：{items[0]['current']}",
-        f"2. **城市与异地弹性**：{items[1]['current']} *(不想看异地大厂可说「关闭异地弹性」)*",
-        f"3. **最低月薪与容忍度**：{items[2]['current']} *(想严格卡死标薪可说「严格卡底薪」)*",
+        f"2. **城市与异地弹性**：{items[1]['current']} *(不想看异地大厂可改「严格仅看所选城市」)*",
+        f"3. **最低月薪与区间口径**：{items[2]['current']} *(可选：看上限宽松 / 看上限达标 / 看下限严格卡起薪)*",
         f"4. **外包 / 派遣 / OD**：{items[3]['current']} *(可改「仅接来信」或「开放接受」)*",
         f"5. **驻场 / 现场外派**：{items[4]['current']} *(可独立改「仅接来信」或「开放接受」)*",
         f"6. **猎头渠道**：{items[5]['current']} *(可改「全部屏蔽猎头」或「主动也看猎头」)*",
@@ -878,6 +1215,7 @@ def build_strategy_confirmation_summary(
     ]
     return {
         "tier": tier,
+        "salary_match_mode": sal_mode,
         "items": items,
         "markdown": "\n".join(md_lines),
     }
@@ -1153,6 +1491,7 @@ def init_workspace(
     remote_bigtech_flex: bool | None = None,
     min_salary_k: int | None = None,
     salary_panel_tolerance: bool | None = None,
+    salary_match_mode: str | None = None,
     filter_outsourcing: bool | None = None,
     outsourcing_policy: str | None = None,
     filter_onsite: bool | None = None,
@@ -1225,6 +1564,8 @@ def init_workspace(
         init_patch["remote_bigtech_flex"] = remote_bigtech_flex
     if salary_panel_tolerance is not None:
         init_patch["salary_panel_tolerance"] = salary_panel_tolerance
+    if salary_match_mode is not None:
+        init_patch["salary_match_mode"] = salary_match_mode
     if filter_outsourcing is not None:
         init_patch["filter_outsourcing"] = filter_outsourcing
     if outsourcing_policy is not None:
@@ -1347,13 +1688,15 @@ def basic_screen_candidate(
     company: str,
     title: str,
     salary_text: str = "",
+    city: str = "",
+    work_address: str = "",
     company_intro: str = "",
     jd_text: str = "",
     is_headhunter: bool = False,
     source: str = "outbound",
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
-    """开源版基础单轮初筛（支持同字号前东家拉黑、可配置的外包/派遣与驻场策略、排除词、猎头开关与底薪参考）。"""
+    """开源版基础单轮初筛（支持同字号前东家拉黑、四源地点核验、可配置的外包/派遣与驻场策略、排除词、猎头开关与底薪参考）。"""
     reasons_block: list[str] = []
     warnings: list[str] = []
 
@@ -1408,13 +1751,36 @@ def basic_screen_candidate(
         elif hh_policy == "inbound_only" and source == "outbound":
             reasons_block.append("猎头策略为“主动找岗不投、仅接被动优质来信”")
 
-    ceil_k = parse_salary_floor_k(salary_text)
+    sal_bounds = parse_salary_bounds_k(salary_text)
+    sal_obfuscated = has_pua_obfuscation(salary_text)
+    sal_mode, sal_tol = _resolve_salary_mode_and_tolerance(config)
     min_k = int(config.get("min_salary_k", 0) or 0)
-    if ceil_k is not None and min_k > 0 and ceil_k < min_k:
-        if config.get("salary_panel_tolerance", True) and ceil_k >= max(1, int(min_k * 0.8)):
-            warnings.append(f"面板薪资上限（{ceil_k}K）略低于期望（{min_k}K），已按弹性容忍保留待核")
-        else:
-            reasons_block.append(f"面板薪资上限（{ceil_k}K）明显低于最低期望（{min_k}K）")
+    if sal_bounds is not None and min_k > 0:
+        low_k, ceil_k = sal_bounds
+        if sal_mode == "floor_strict":
+            if low_k < min_k:
+                reasons_block.append(
+                    f"起薪下限（{low_k}K，标薪 {salary_text}）低于严格起薪底线（{min_k}K）"
+                )
+        elif ceil_k < min_k:
+            if sal_tol and ceil_k >= max(1, int(min_k * 0.8)):
+                warnings.append(f"面板薪资上限（{ceil_k}K）略低于期望（{min_k}K），已按弹性容忍保留待核")
+            else:
+                reasons_block.append(f"面板薪资上限（{ceil_k}K）明显低于最低期望（{min_k}K）")
+    elif sal_obfuscated and min_k > 0:
+        warnings.append(
+            "检测到面板薪资含 BOSS 字体混淆私用区字符（DOM 快照乱码）：若当前模型支持看图，建议对职位详情头部调 screenshot() 确认明文薪资，或在搜索栏勾选明文「薪资待遇」筛选器"
+        )
+
+    loc_check = analyze_job_location_signals(
+        title=title,
+        jd_text=jd_text,
+        city=city,
+        work_address=work_address,
+        preferred_cities=config.get("preferred_cities") or [],
+    )
+    if loc_check["mismatch"]:
+        reasons_block.append(str(loc_check["reason"]))
 
     matched_roles = [
         role for role in config.get("target_roles", []) if role.lower() in title.lower()
@@ -1423,6 +1789,11 @@ def basic_screen_candidate(
     if ui_jd_unfetched:
         warnings.append(
             f"当前会话已绑定职位「{title.strip()}」但未传入详细 JD：请先点击聊天窗顶部的职位名称或「查看职位」查看现成 JD 与公司信息，严禁向招聘方开口索要岗位职责"
+        )
+    jd_truncated_suspected = detect_jd_truncation_risk(jd_text)
+    if jd_truncated_suspected:
+        warnings.append(
+            "检测到传入的 JD 末尾疑似被 BOSS 列表页折叠收起或截断：请先确认页面上无「展开/查看全部/查看更多」收起按钮，或滚动右侧详情到底部确认完整 JD 后再评估（避免漏掉文末的真实 base 地、外派或硬性门槛）"
         )
     return {
         "ok": True,
@@ -1434,8 +1805,13 @@ def basic_screen_candidate(
         "is_onsite": is_onsite,
         "outsourcing_policy": out_pol,
         "onsite_policy": onsite_pol,
+        "salary_match_mode": sal_mode,
+        "salary_obfuscated": sal_obfuscated,
         "matched_target_roles": matched_roles,
         "ui_jd_unfetched": ui_jd_unfetched,
+        "jd_truncated_suspected": jd_truncated_suspected,
+        "location_mismatch": bool(loc_check["mismatch"]),
+        "location_conflict": bool(loc_check["conflict"]),
     }
 
 

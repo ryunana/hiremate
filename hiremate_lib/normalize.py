@@ -883,15 +883,290 @@ def sanitize_csv_cell(value: object) -> str:
     return text
 
 
-def parse_salary_floor_k(salary_text: str) -> int | None:
-    """从面板薪资字符串（如 '25-40K·15薪'）提取上限月薪 K 数用于初筛参考。"""
+def has_pua_obfuscation(text: str) -> bool:
+    """检测字符串是否包含 BOSS 直聘动态反爬字体常用的 Unicode 私用区（PUA）码点。"""
+    if not text:
+        return False
+    for ch in text:
+        cp = ord(ch)
+        if 0xE000 <= cp <= 0xF8FF or 0xF0000 <= cp <= 0x10FFFD:
+            return True
+    return False
+
+
+def parse_salary_bounds_k(salary_text: str) -> tuple[int, int] | None:
+    """从面板薪资字符串（如 '12-18K'、'25-40K·15薪'、'24-36W/年'）提取月薪 (下限K, 上限K)。"""
     if not salary_text:
         return None
     text = salary_text.upper().replace(" ", "")
-    match_range = re.search(r"(\d+)\s*[-~至]\s*(\d+)\s*K", text)
+    match_range = re.search(r"(\d+)\s*[-~至–—]\s*(\d+)\s*K", text)
     if match_range:
-        return int(match_range.group(2))
+        a, b = int(match_range.group(1)), int(match_range.group(2))
+        return (min(a, b), max(a, b))
+    match_annual_range = re.search(r"(\d+(?:\.\d+)?)\s*[-~至–—]\s*(\d+(?:\.\d+)?)\s*(?:W|万)\s*(?:/\s*年|每年|年薪)?", text)
+    if match_annual_range and ("/年" in text or "每年" in text or "年薪" in text or "W" in text):
+        # 排除如 '100-499人' 或融资规模，仅当明确带年薪/W标薪语义时折算月薪 K
+        low_w, high_w = float(match_annual_range.group(1)), float(match_annual_range.group(2))
+        low_k = max(1, int(round(low_w * 10.0 / 12.0)))
+        high_k = max(low_k, int(round(high_w * 10.0 / 12.0)))
+        return (low_k, high_k)
     match_single = re.search(r"(\d+)\s*K", text)
     if match_single:
-        return int(match_single.group(1))
+        val = int(match_single.group(1))
+        return (val, val)
     return None
+
+
+def parse_salary_floor_k(salary_text: str) -> int | None:
+    """从面板薪资字符串（如 '25-40K·15薪'）提取上限月薪 K 数用于初筛参考。"""
+    bounds = parse_salary_bounds_k(salary_text)
+    return bounds[1] if bounds is not None else None
+
+
+_PROVINCE_CITIES: dict[str, tuple[str, ...]] = {
+    "广东": (
+        "深圳", "广州", "东莞", "佛山", "珠海", "惠州", "中山", "江门", "肇庆",
+        "汕头", "湛江", "茂名", "揭阳", "潮州", "清远", "韶关", "梅州", "汕尾", "河源", "阳江", "云浮",
+    ),
+    "大湾区": (
+        "深圳", "广州", "东莞", "佛山", "珠海", "惠州", "中山", "江门", "肇庆", "香港", "澳门",
+    ),
+    "江苏": (
+        "南京", "苏州", "无锡", "昆山", "常州", "南通", "扬州", "徐州", "镇江", "泰州", "盐城", "连云港", "淮安", "宿迁",
+    ),
+    "浙江": (
+        "杭州", "宁波", "温州", "嘉兴", "绍兴", "金华", "台州", "湖州", "衢州", "舟山", "丽水",
+    ),
+    "长三角": (
+        "上海", "杭州", "南京", "苏州", "无锡", "昆山", "宁波", "合肥", "常州", "南通", "嘉兴", "绍兴", "温州",
+    ),
+    "湖南": ("长沙", "株洲", "湘潭", "衡阳", "岳阳", "常德", "益阳", "郴州", "永州", "邵阳", "娄底", "怀化"),
+    "湖北": ("武汉", "襄阳", "宜昌", "荆州", "黄石", "十堰", "孝感", "荆门", "鄂州", "黄冈", "咸宁"),
+    "四川": ("成都", "绵阳", "德阳", "宜宾", "泸州", "南充", "乐山", "眉山"),
+    "福建": ("福州", "厦门", "泉州", "漳州", "莆田", "龙岩", "宁德"),
+    "山东": ("济南", "青岛", "烟台", "潍坊", "临沂", "淄博", "济宁", "威海", "泰安", "德州"),
+    "河南": ("郑州", "洛阳", "南阳", "许昌", "新乡", "安阳", "焦作", "开封"),
+    "安徽": ("合肥", "芜湖", "蚌埠", "阜阳", "安庆", "宿州", "马鞍山"),
+    "陕西": ("西安", "咸阳", "宝鸡", "渭南", "榆林", "延安"),
+    "辽宁": ("沈阳", "大连", "鞍山", "抚顺", "锦州", "营口", "盘锦"),
+    "河北": ("石家庄", "唐山", "保定", "廊坊", "沧州", "邯郸", "秦皇岛", "雄安"),
+    "江西": ("南昌", "赣州", "九江", "上饶", "宜春", "吉安", "景德镇"),
+    "云南": ("昆明", "曲靖", "大理", "玉溪", "丽江"),
+    "贵州": ("贵阳", "遵义", "六盘水", "安顺"),
+    "广西": ("南宁", "柳州", "桂林", "北海", "玉林"),
+    "海南": ("海口", "三亚", "儋州"),
+    "山西": ("太原", "大同", "晋中", "运城", "临汾"),
+    "黑龙江": ("哈尔滨", "大庆", "齐齐哈尔"),
+    "吉林": ("长春", "吉林"),
+    "甘肃": ("兰州", "天水"),
+    "新疆": ("乌鲁木齐",),
+    "内蒙古": ("呼和浩特", "包头", "鄂尔多斯"),
+    "宁夏": ("银川",),
+    "青海": ("西宁",),
+    "西藏": ("拉萨",),
+}
+
+_DIRECT_CITIES: tuple[str, ...] = (
+    "北京", "上海", "天津", "重庆", "香港", "澳门", "台北", "新加坡", "东京", "硅谷", "伦敦", "迪拜",
+)
+
+_ALL_KNOWN_CITIES: tuple[str, ...] = tuple(
+    sorted(
+        set(_DIRECT_CITIES) | {c for cities in _PROVINCE_CITIES.values() for c in cities},
+        key=len,
+        reverse=True,
+    )
+)
+
+_CITY_PATTERN_RE = re.compile(
+    "(" + "|".join(re.escape(c) for c in _ALL_KNOWN_CITIES) + r")(?!大学|学院|理工|邮电|师范|银行|证券|保险)"
+)
+_EXPLICIT_LOC_CUE_RE = re.compile(
+    r"(?:base地?|工作地点?|工作城市|办公地点?|上班地点?|入职地点?|岗位地点?|常驻地?|派驻地?|外派地?|驻地|坐班地?)"
+    r"\s*[:：\-—/·\s]*([^\n。；;！!？?\)）\]】]{1,28})",
+    re.IGNORECASE,
+)
+_TITLE_BRACKET_RE = re.compile(r"[（(\[【]\s*([^）)\]】]{1,24})\s*[）)\]】]")
+_TITLE_TAIL_LOC_RE = re.compile(r"[-—/|·\s]+([^\-\n—/|·\s]{2,12})$")
+_JD_TRUNCATION_CONTROL_RE = re.compile(
+    r"(?:展开全部|查看全部|查看更多|展开更多|点击展开|显示全部|阅读全文|(?:(?:\.\.\.|……|…)\s*展开))\s*$"
+)
+_JD_TRUNCATION_ELLIPSIS_RE = re.compile(r"(?:\.\.\.|……|…)\s*$")
+
+
+def _extract_cities_from_snippet(text: str) -> list[str]:
+    if not text:
+        return []
+    found: list[str] = []
+    for m in _CITY_PATTERN_RE.finditer(text):
+        c = m.group(1)
+        if c not in found:
+            found.append(c)
+    return found
+
+
+def _expand_preferred_locations(preferred_cities: list[str] | None) -> tuple[bool, set[str], list[str]]:
+    """展开用户优先城市/省份配置；返回 (是否不限城市, 允许的城市集合, 原始偏好列表)。"""
+    raw_list = [str(c).strip() for c in (preferred_cities or []) if str(c).strip()]
+    if not raw_list:
+        return True, set(), []
+    allowed: set[str] = set()
+    for item in raw_list:
+        if any(tok in item for tok in ("不限", "全国", "任意", "远程")):
+            return True, set(), raw_list
+        clean = item.rstrip("省市")
+        if clean in _PROVINCE_CITIES:
+            allowed.update(_PROVINCE_CITIES[clean])
+        if item in _PROVINCE_CITIES:
+            allowed.update(_PROVINCE_CITIES[item])
+        extracted = _extract_cities_from_snippet(item)
+        if extracted:
+            allowed.update(extracted)
+        elif clean:
+            allowed.add(clean)
+    return False, allowed, raw_list
+
+
+def _city_hits_preferred(city_name: str, allowed_cities: set[str], raw_prefs: list[str]) -> bool:
+    if not city_name:
+        return False
+    clean = city_name.rstrip("市")
+    if clean in allowed_cities or city_name in allowed_cities:
+        return True
+    return any(p.rstrip("省市") in city_name or city_name in p for p in raw_prefs if p.rstrip("省市"))
+
+
+def analyze_job_location_signals(
+    *,
+    title: str = "",
+    jd_text: str = "",
+    city: str = "",
+    work_address: str = "",
+    preferred_cities: list[str] | None = None,
+) -> dict[str, Any]:
+    """四源工作地点交叉核验：同时核验「岗位标题 + JD显式base/工作地/常驻/派驻 + 面板地点标签 + 工作地址」。"""
+    unlimited, allowed_cities, raw_prefs = _expand_preferred_locations(preferred_cities)
+
+    title_s = (title or "").strip()
+    jd_s = (jd_text or "").strip()
+    city_s = (city or "").strip()
+    addr_s = (work_address or "").strip()
+
+    # 1. 岗位标题显式地点（最高优先级：base地/工作地/常驻/派驻/外派 + 括号内/末尾城市）
+    title_cities: list[str] = []
+    for m in _EXPLICIT_LOC_CUE_RE.finditer(title_s):
+        for c in _extract_cities_from_snippet(m.group(1)):
+            if c not in title_cities:
+                title_cities.append(c)
+    for m in _TITLE_BRACKET_RE.finditer(title_s):
+        for c in _extract_cities_from_snippet(m.group(1)):
+            if c not in title_cities:
+                title_cities.append(c)
+    m_tail = _TITLE_TAIL_LOC_RE.search(title_s)
+    if m_tail:
+        for c in _extract_cities_from_snippet(m_tail.group(1)):
+            if c not in title_cities:
+                title_cities.append(c)
+
+    # 2. JD 正文显式工作地（仅抓明确带 base/工作地/常驻/派驻/外派 等引导词的句段，避免误伤业务覆盖区域）
+    jd_cities: list[str] = []
+    for m in _EXPLICIT_LOC_CUE_RE.finditer(jd_s):
+        snippet = m.group(1)
+        if "出差" in snippet:
+            continue
+        for c in _extract_cities_from_snippet(snippet):
+            if c not in jd_cities:
+                jd_cities.append(c)
+
+    # 3. 面板地点标签 & 4. 工作地址
+    tag_cities = _extract_cities_from_snippet(city_s)
+    if not tag_cities and city_s:
+        head_city = re.split(r"[·・\s\-/]+", city_s)[0].strip().rstrip("市")
+        if head_city:
+            tag_cities = [head_city]
+    addr_cities = _extract_cities_from_snippet(addr_s)
+
+    base_result: dict[str, Any] = {
+        "has_preferred_cities": not unlimited,
+        "title_cities": title_cities,
+        "jd_cities": jd_cities,
+        "tag_cities": tag_cities,
+        "address_cities": addr_cities,
+        "effective_cities": title_cities or jd_cities or addr_cities or tag_cities,
+        "matched": True,
+        "mismatch": False,
+        "conflict": False,
+        "reason": "",
+    }
+    if unlimited:
+        return base_result
+
+    def _any_hits(cs: list[str]) -> bool:
+        return any(_city_hits_preferred(c, allowed_cities, raw_prefs) for c in cs)
+
+    tag_or_addr_hits = _any_hits(tag_cities) or _any_hits(addr_cities)
+    tag_label = "、".join(tag_cities or addr_cities) or city_s
+
+    # 优先级 1：标题明确写了工作地/base，且全部不在优先城市范围内
+    if title_cities and not _any_hits(title_cities):
+        declared = "、".join(title_cities)
+        conflict = tag_or_addr_hits
+        reason = (
+            f"地点信息矛盾：面板/地址标注「{tag_label}」，但岗位标题明确写明工作地为「{declared}」，不在优先城市范围内"
+            if conflict
+            else f"岗位标题明确写明工作地为「{declared}」，不在优先城市范围内"
+        )
+        base_result.update({"matched": False, "mismatch": True, "conflict": conflict, "reason": reason})
+        return base_result
+
+    # 优先级 2：JD 正文明确写了 base/工作地/常驻/派驻，且全部不在优先城市范围内
+    if jd_cities and not _any_hits(jd_cities):
+        declared = "、".join(jd_cities)
+        conflict = tag_or_addr_hits
+        reason = (
+            f"地点信息矛盾：面板/地址标注「{tag_label}」，但 JD 明确写明工作地为「{declared}」，不在优先城市范围内"
+            if conflict
+            else f"JD 明确写明工作地为「{declared}」，不在优先城市范围内"
+        )
+        base_result.update({"matched": False, "mismatch": True, "conflict": conflict, "reason": reason})
+        return base_result
+
+    # 优先级 3：工作地址明确落在非优先城市
+    if addr_cities and not _any_hits(addr_cities):
+        declared = "、".join(addr_cities)
+        conflict = _any_hits(tag_cities)
+        reason = (
+            f"地点信息矛盾：地点标签写「{'、'.join(tag_cities)}」，但工作地址实际在「{declared}」，不在优先城市范围内"
+            if conflict
+            else f"工作地址（{declared}）不在优先城市范围内"
+        )
+        base_result.update({"matched": False, "mismatch": True, "conflict": conflict, "reason": reason})
+        return base_result
+
+    # 优先级 4：面板地点标签本身不在优先城市
+    if tag_cities and not _any_hits(tag_cities):
+        declared = "、".join(tag_cities)
+        base_result.update(
+            {
+                "matched": False,
+                "mismatch": True,
+                "conflict": False,
+                "reason": f"工作地（{declared}）不在优先城市范围内",
+            }
+        )
+        return base_result
+
+    return base_result
+
+
+def detect_jd_truncation_risk(jd_text: str) -> bool:
+    """检测传入的 JD 末尾是否疑似被 BOSS 列表页折叠收起或省略截断，避免漏掉文末的真实 base 地、外派或硬性门槛。"""
+    text = (jd_text or "").strip()
+    if not text:
+        return False
+    tail = text[-28:]
+    if _JD_TRUNCATION_CONTROL_RE.search(tail):
+        return True
+    if _JD_TRUNCATION_ELLIPSIS_RE.search(tail):
+        return True
+    return False

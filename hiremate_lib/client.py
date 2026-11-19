@@ -417,6 +417,7 @@ def config_to_pro_preferences(config: dict[str, Any]) -> dict[str, Any]:
         "allow_remote_bigtech": bool(config.get("remote_bigtech_flex", True)),
         "expected_salary_min_k": int(config.get("min_salary_k", 20)),
         "tolerate_lower_panel_salary": bool(config.get("salary_panel_tolerance", True)),
+        "salary_match_mode": str(config.get("salary_match_mode") or ("ceiling_tolerant" if config.get("salary_panel_tolerance", True) else "ceiling_strict")),
         "inbound_resume_policy": str(config.get("inbound_resume_policy") or "generous"),
         "has_attachment_resume": bool(config.get("has_attachment_resume", True)),
         "resume_source": str(config.get("resume_source") or "pending"),
