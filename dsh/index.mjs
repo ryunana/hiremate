@@ -97,20 +97,9 @@ function sendHtml(res, status, html) {
   res.end(buf)
 }
 
-function isTrustedRequestHost(req) {
-  const hostHeader = String(req.headers.host || '').trim().toLowerCase()
-  if (!hostHeader) return false
-  // 阻断恶意域名 DNS Rebinding（仅放行 localhost / 回环 IP / 显式 IP 字面量访问）
-  const bareHost = hostHeader.startsWith('[')
-    ? hostHeader.slice(0, hostHeader.indexOf(']') + 1)
-    : hostHeader.split(':')[0]
-  if (bareHost === 'localhost' || bareHost === '127.0.0.1' || bareHost === '[::1]') return true
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(bareHost)) return true
-  return false
-}
-
 function isSameOriginBrowserRequest(req, { requireCustomHeader = false } = {}) {
-  if (!isTrustedRequestHost(req)) return false
+  // 注意：DSH 桌面端（dsh-app://app）在 Electron 协议转发层 forwardWebRequest 中已校验 origin === "dsh-app://app" 与私有 cookie，
+  // 随后会主动剥离 host / origin / sec-fetch-site 再转发至本地 127.0.0.1 webServer；因此不能在无 Origin 头时强求 sec-fetch-site === "same-origin"。
   const fetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase()
   if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') {
     return false
@@ -119,13 +108,12 @@ function isSameOriginBrowserRequest(req, { requireCustomHeader = false } = {}) {
     return false
   }
   const origin = req.headers.origin
-  if (origin) {
+  if (origin && !/^dsh-app:\/\//i.test(String(origin))) {
     const stripped = String(origin).replace(/^https?:\/\//i, '').toLowerCase()
-    if (stripped !== String(req.headers.host || '').trim().toLowerCase()) {
+    const hostHeader = String(req.headers.host || '').trim().toLowerCase()
+    if (hostHeader && stripped !== hostHeader) {
       return false
     }
-  } else if (requireCustomHeader && fetchSite !== 'same-origin') {
-    return false
   }
   return true
 }

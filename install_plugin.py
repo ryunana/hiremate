@@ -76,7 +76,7 @@ def _read_open_version() -> str:
         m = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init_py.read_text(encoding="utf-8"))
         if m:
             return m.group(1).strip()
-    return "0.6.8"
+    return "0.6.9"
 
 
 def _canonical_home_dir(canonical_home: str | None = None) -> Path:

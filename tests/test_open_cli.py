@@ -3134,6 +3134,103 @@ mainComp();
         shell_html = hm_mcp._build_shell_html()
         self.assertIn('rawHtml.indexOf("<head>")', shell_html)
 
+        # 5. DSH Desktop 协议转发回归：Electron forwardWebRequest 剥离 origin 与 sec-fetch-site 后，学习语气与保存策略 POST 均正常返回 200（而跨站或缺失自定义头仍拦截 403）
+        import shutil
+        node_bin = shutil.which("node")
+        if node_bin:
+            index_mjs_url = (OPEN_ROOT / "dsh" / "index.mjs").resolve().as_uri()
+            dsh_srv_script = f"""
+import {{ Readable }} from 'node:stream';
+import {{ apply }} from {json.dumps(index_mjs_url)};
+
+let routeHandler = null;
+apply({{
+  effect: (fn) => fn(),
+  skills: {{ register: () => () => {{}} }},
+  inject: (deps, cb) => {{
+    if (deps.includes('webServer')) {{
+      cb({{
+        effect: (fn) => fn(),
+        webServer: {{ register: (spec) => {{ routeHandler = spec.handler; return () => {{}}; }} }},
+      }});
+    }}
+  }},
+}});
+
+async function callHandler(url, method, headers, bodyStr) {{
+  const req = Readable.from(bodyStr ? [Buffer.from(bodyStr, 'utf8')] : []);
+  req.url = url;
+  req.method = method;
+  req.headers = headers;
+  let status = 200;
+  const outChunks = [];
+  const res = {{
+    writeHead(s) {{ status = s; }},
+    end(buf) {{ if (buf) outChunks.push(Buffer.isBuffer(buf) ? buf : Buffer.from(String(buf))); }},
+  }};
+  await routeHandler(req, res);
+  return {{ status, body: JSON.parse(Buffer.concat(outChunks).toString('utf8')) }};
+}}
+
+const envBackup = process.env.HIREMATE_HOME;
+process.env.HIREMATE_HOME = {json.dumps(str(hm))};
+try {{
+  // 模拟 DSH Desktop forwardWebRequest：剥离了 origin 与 sec-fetch-site，仅保留 host 与自定义头
+  const okVoice = await callHandler(
+    '/hiremate/api/voice/collect',
+    'POST',
+    {{ host: '127.0.0.1:31999', 'content-type': 'application/json', 'x-hiremate-same-origin': '1' }},
+    '{{}}'
+  );
+  const okSave = await callHandler(
+    '/hiremate/api/config/save',
+    'POST',
+    {{ host: '127.0.0.1:31999', 'content-type': 'application/json', 'x-hiremate-same-origin': '1' }},
+    JSON.stringify({{ patch: {{ min_salary_k: 32 }} }})
+  );
+  const blockedNoHdr = await callHandler(
+    '/hiremate/api/voice/collect',
+    'POST',
+    {{ host: '127.0.0.1:31999', 'content-type': 'application/json' }},
+    '{{}}'
+  );
+  const blockedEvilOrigin = await callHandler(
+    '/hiremate/api/voice/collect',
+    'POST',
+    {{ host: '127.0.0.1:31999', origin: 'https://evil.example.com', 'content-type': 'application/json', 'x-hiremate-same-origin': '1' }},
+    '{{}}'
+  );
+  process.stdout.write(JSON.stringify({{ okVoice, okSave, blockedNoHdr, blockedEvilOrigin }}));
+}} finally {{
+  if (envBackup === undefined) delete process.env.HIREMATE_HOME;
+  else process.env.HIREMATE_HOME = envBackup;
+}}
+"""
+            isolated_env = {
+                **os.environ,
+                "HIREMATE_HOME": str(hm),
+                "DSH_HOME": str(rev_dsh),
+                "CLAUDE_HOME": str(self.root / "empty-claude"),
+                "CODEX_HOME": str(rev_codex),
+                "AGY_DATA_HOME": str(rev_agy),
+                "WORKBUDDY_HOME": str(self.root / "empty-wb"),
+            }
+            srv_proc = subprocess.run(
+                [node_bin, "--input-type=module", "-e", dsh_srv_script],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+                env=isolated_env,
+            )
+            srv_out = json.loads(srv_proc.stdout)
+            self.assertEqual(srv_out["okVoice"]["status"], 200, srv_out["okVoice"])
+            self.assertTrue(srv_out["okVoice"]["body"]["ok"])
+            self.assertEqual(srv_out["okSave"]["status"], 200, srv_out["okSave"])
+            self.assertTrue(srv_out["okSave"]["body"]["ok"])
+            self.assertEqual(srv_out["blockedNoHdr"]["status"], 403)
+            self.assertEqual(srv_out["blockedEvilOrigin"]["status"], 403)
+
 
 if __name__ == "__main__":
     unittest.main()
