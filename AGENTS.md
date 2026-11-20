@@ -24,8 +24,10 @@ elif [ -f "open/install_plugin.py" ]; then
 fi
 ```
 
-- 安装器会将唯一主副本写入 `~/.hiremate/skill/hiremate`，并建立目录软链同步至本机已安装的 `WorkBuddy`、`dsh`、`Claude Code`、`Codex`；
-- **当前会话无需等待用户重启客户端**：直接调用 `python3 ~/.hiremate/skill/hiremate/hiremate.py` 即可立即执行后续步骤（仅 `dsh` 的 `/hiremate-status`、`/hiremate-login`、`/hiremate-dashboard`、`/hiremate-update` 四个快捷斜杠命令菜单在下次重载后显示，顺带提一句即可，不要停下等重启）；
+- 安装器会将唯一主副本写入 `~/.hiremate/skill/hiremate`，建立目录软链同步至本机已安装的 `WorkBuddy`、`dsh`、`Antigravity`、`Claude Code`、`Codex`，并自动为 `DeepSeek Harness`、`OpenAI Codex` 与 `Antigravity` 挂载左侧边栏「求职助手」工作台入口；
+- **【按宿主能力主动提示侧边栏看板入口（仅限支持侧边栏看板的 Agent）】**：
+  - **若你当前正运行在支持侧边栏看板的宿主中**（`DeepSeek Harness (dsh)`、`OpenAI Codex` 或 `Antigravity`，即 `install_plugin.py` 返回 `sidebar_guide.current_host_supports_sidebar: true`）：**必须在向新用户反馈安装完成时主动顺带提醒一句**——可以通过客户端**左侧边栏的「求职助手」入口**（Antigravity 为侧边栏/辅助面板「求职助手看板」）随时查看实时投递转化漏斗、一键学习对话语气与在线修改筛选策略（首次刚安装完可能需要重载/重启一次客户端才会显示侧栏图标与 `dsh` 的 `/hiremate-*` 斜杠命令菜单，提醒用户**现在不必停下重启**，当前会话可直接调用 `python3 ~/.hiremate/skill/hiremate/hiremate.py` 完成建档）；
+  - **若你当前运行在不支持第三方侧边栏面板的宿主中**（如 `WorkBuddy`、`Claude Code`、`Cursor`、`Windsurf`）：**切勿误导用户去侧边栏找看板**，仅告知建档后可随时在浏览器打开本地可视化看板 `dashboard.html` 即可；
 - **后续自动感知与一键升级**：日常命令每 6 小时静默向公开仓（Gitee 主源 + GitHub 备源）检查一次新版本，返回 `update_notice` 时在回复末尾提醒用户说「升级求职助手」（运行 `hiremate.py update` 或 `/hiremate-update`）即可全宿主无损自动升级；
 - 安装完成后，请立即读取 `~/.hiremate/skill/hiremate/SKILL.md` 按标准规约执行。
 
@@ -69,12 +71,12 @@ python3 ~/.hiremate/skill/hiremate/hiremate.py auth status
    - **必须把以下 8 项默认筛选策略完整列给用户确认是否需要修改**（绝不能让用户事后自己去翻求职看板才发现这些规则）：
      1. **目标岗位方向**（从简历提炼预填）；
      2. **优先城市 & 异地大厂弹性**（默认**开启**「异地知名大厂可先聊」，不想看异地大厂可传 `--remote-bigtech-flex false`）；
-     3. **期望最低月薪 & 面板标薪容忍度**（默认**开启**「容忍面板标薪略低约 20% 先聊」，想严格卡死标薪可传 `--salary-panel-tolerance false`）；
+     3. **期望最低月薪 & 区间标薪匹配口径**（默认 `ceiling_tolerant` 看上限宽松·容忍面板标薪略低约 20% 先聊；支持 `--salary-match-mode ceiling_strict` 看上限严格达标 / `floor_strict` 看下限严格卡起薪）；
      4. **外包 / 派遣 / OD 策略**（默认 `block_all` 全部排除；支持 `inbound_only` 仅接被动来信 / `allow_all` 开放）；
      5. **驻场 / 现场外派策略**（默认 `block_all` 全部排除；可与外包独立分开设置）；
      6. **猎头渠道策略**（默认 `inbound_only` 主动搜岗不投猎头、仅接猎头主动优质来信；可改 `block_all` 全部屏蔽 / `allow_all` 全部开放）；
      7. **自动拉黑前东家 + 额外屏蔽企业 + 岗位排除词**（简历中的全部前东家自动同字号拉黑；支持追加 `--blocked-companies` 与 `--exclude-keywords`）；
-     8. **被动索要简历策略 & 自动化档位**（默认 `generous` 除非明显不符尽量给，可改 `strict`；免费版为半自动审阅，Pro 版可随时将主动找岗与消息答疑切换为 `auto` 全自动）。
+     8. **被动索要简历策略 & 找岗/答疑档位**（默认 `generous` 除非明显不符尽量给，可改 `strict`；找岗默认 `semi` 半自动审阅单，免费版与 Pro 均可切 `--mode-discover favorite` **仅自动收藏·不主动投递**；Pro 版另支持随时将主动找岗切 `auto` 全自动破冰、后台定时静默收藏与消息全自动答疑）。
 
 拿到简历内容（本地文件或在线简历）后：
 1. **先输出精简清晰的《求职建档与 8 项筛选策略确认单》**（含提炼的《个人求职事实与答法档案》摘要、自动识别的前东家名单、以及上述 **全部 8 项筛选策略的当前设定值**），明确请用户确认或指出要修改的项（**未经展示确认，严禁直接静默调 `init` 把默认策略偷偷落盘**）；
@@ -85,7 +87,7 @@ python3 ~/.hiremate/skill/hiremate/hiremate.py auth status
 
 完成 `init` 并将档案写入 `profile_facts_file` 后，**必须在同一条回复回合内连续做完以下两件事，绝不能只说一句“建档已完成”就结束对话，也绝不能只塞一个不起眼的看板超链接让用户忽略看板功能**：
 
-1. **立即生成并在浏览器自动弹开初始求职看板**：运行 `python3 ~/.hiremate/skill/hiremate/hiremate.py build-dashboard --open`（直接拉起系统默认浏览器展示可视化看板；免费版看板内自带 Pro 一键在线买断入口与首轮启动口令），并在回复正文中**独立成块完整展示 `dashboard_spotlight.markdown`**（向用户讲清看板里的 **6 维实时投递转化漏斗**、**约面/谈薪置顶提醒队列**、**外包与前东家排雷全量台账** 及 **8 项策略与简历路由总览**，并告知 DeepSeek Harness 可随时输入 `/hiremate-dashboard` 一键弹开）；
+1. **立即生成并在浏览器自动弹开初始求职看板**：运行 `python3 ~/.hiremate/skill/hiremate/hiremate.py build-dashboard --open`（直接拉起系统默认浏览器展示可视化看板；免费版看板内自带 Pro 一键在线买断入口与首轮启动口令），并在回复正文中**独立成块完整展示 `dashboard_spotlight.markdown`**（向用户讲清看板里的 **6 维实时投递转化漏斗**、**约面/谈薪置顶提醒队列**、**外包与前东家排雷全量台账** 及 **8 项策略与简历路由总览**；若当前宿主为支持侧边栏的 `dsh` / `Codex` / `Antigravity`，同步保留卡片中的侧边栏「求职助手」直达提醒；不支持侧边栏的宿主则仅引导在浏览器打开）；
 2. **在回复末尾展示可一键回复数字 `1 / 2 / 3` 的《下一步开始菜单》**（直接复用 `init` 或 `build-dashboard` 返回 JSON 中的 `post_onboarding_guide.user_reply_menu_markdown`）：
    - **具备浏览器权限时（免费版）**：明确提示用户**直接回复 `1`（推荐）**即可立即去 BOSS 直聘跑第一轮搜岗深筛与半自动破冰预览（先出审阅单，未经确认绝不点发送）；回复 `2` 可粘贴单条岗位 JD / HR 消息参谋；回复 `3` 在浏览器查看可视化看板或微调筛选条件；
    - **具备浏览器权限时（Pro 买断版）**：提示回复 `1` 立即跑首轮 Pro 深度排雷筛岗 + 检查未读消息；回复 `2` 一键挂载**工作日工作时间自动巡检定时任务**（周一至周五 `09:00–12:00`、`14:00–18:00` 每 10～15 分钟）；回复 `3` 调整 `semi` / `auto` 档位或打开 Pro 看板；

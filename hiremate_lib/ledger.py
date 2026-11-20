@@ -25,27 +25,42 @@ from .xlsx_export import write_xlsx_workbook
 
 VALID_STATUSES: tuple[str, ...] = (
     "discovered",           # 待审阅候选（免费预览或半自动待确认）
+    "favorited",            # 已自动收藏待本人投递（网页已点击感兴趣）
     "screened_skip",        # 已深筛排雷跳过
     "opening_sent",         # 单向系统开场已送达
     "connected",            # 双方已建联有实质回复
     "resume_requested",     # 已发起附件简历请求待对方点同意（绝不等同于已送达！）
     "resume_delivered",     # 确认 PDF 附件简历已送达
     "handed_off",           # 触发约面/谈薪/超纲红线，已交回本人待处理
-    "interview_scheduled",  # 本人已敲定约面或进入后续面试跟进（从紧急待办队列移出）
-    "closed_rejected",      # 不合适已礼貌收尾归档
+    "interview_scheduled",  # 已敲定约面（可由助手从 BOSS 约面消息同步或本人告知）
+    "interviewing",         # 面试推进中（二面/终面等后续轮次，由本人告知记录）
+    "offer",                # 已获 Offer / 谈薪决策中（由本人告知记录）
+    "offer_accepted",       # 已接 Offer / 待入职归档
+    "closed_rejected",      # 不合适或面试未通过已归档
 )
 
 STATUS_LABELS: dict[str, str] = {
     "discovered": "待确认候选",
+    "favorited": "已收藏·待本人投递",
     "screened_skip": "不匹配跳过",
     "opening_sent": "开场已送达",
     "connected": "双方已建联",
     "resume_requested": "待同意简历请求",
     "resume_delivered": "PDF 简历已送达",
     "handed_off": "待本人约面/决策",
-    "interview_scheduled": "已约面/跟进中",
+    "interview_scheduled": "已约面",
+    "interviewing": "面试推进中",
+    "offer": "已获 Offer",
+    "offer_accepted": "已接 Offer",
     "closed_rejected": "不合适归档",
 }
+
+INTERVIEW_STAGE_STATUSES: frozenset[str] = frozenset({
+    "interview_scheduled",
+    "interviewing",
+    "offer",
+    "offer_accepted",
+})
 
 ACTIVE_CHAT_STATUSES: frozenset[str] = frozenset({
     "opening_sent",
@@ -54,7 +69,24 @@ ACTIVE_CHAT_STATUSES: frozenset[str] = frozenset({
     "resume_delivered",
     "handed_off",
     "interview_scheduled",
+    "interviewing",
+    "offer",
+    "offer_accepted",
 })
+
+VALID_INTERVIEW_OUTCOMES: tuple[str, ...] = (
+    "pending",
+    "passed",
+    "failed",
+    "cancelled",
+)
+
+INTERVIEW_OUTCOME_LABELS: dict[str, str] = {
+    "pending": "待面试",
+    "passed": "已通过",
+    "failed": "未通过",
+    "cancelled": "已取消",
+}
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -78,6 +110,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     icebreaker TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL CHECK(status IN (
         'discovered',
+        'favorited',
         'screened_skip',
         'opening_sent',
         'connected',
@@ -85,16 +118,22 @@ CREATE TABLE IF NOT EXISTS jobs (
         'resume_delivered',
         'handed_off',
         'interview_scheduled',
+        'interviewing',
+        'offer',
+        'offer_accepted',
         'closed_rejected'
     )),
     resume_used TEXT NOT NULL DEFAULT '',
     job_url TEXT NOT NULL DEFAULT '',
     note TEXT NOT NULL DEFAULT '',
+    favorited_at TEXT,
     opening_sent_at TEXT,
     connected_at TEXT,
     resume_requested_at TEXT,
     resume_delivered_at TEXT,
     handed_off_at TEXT,
+    interview_scheduled_at TEXT,
+    offer_at TEXT,
     closed_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -115,6 +154,22 @@ CREATE TABLE IF NOT EXISTS ledger_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_job_id ON ledger_events(job_id);
+
+CREATE TABLE IF NOT EXISTS interview_rounds (
+    round_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    round_label TEXT NOT NULL DEFAULT '一面',
+    scheduled_at TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT '',
+    interviewer TEXT NOT NULL DEFAULT '',
+    outcome TEXT NOT NULL DEFAULT 'pending' CHECK(outcome IN ('pending', 'passed', 'failed', 'cancelled')),
+    summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_interview_rounds_job_id ON interview_rounds(job_id);
+CREATE INDEX IF NOT EXISTS idx_interview_rounds_outcome ON interview_rounds(outcome);
 """
 
 
@@ -123,6 +178,13 @@ def _validate_status(status: str) -> str:
     if st not in VALID_STATUSES:
         raise ValueError(f"非法账本状态 {status!r}，允许枚举：{VALID_STATUSES}")
     return st
+
+
+def _validate_interview_outcome(outcome: str) -> str:
+    oc = (outcome or "pending").strip() or "pending"
+    if oc not in VALID_INTERVIEW_OUTCOMES:
+        raise ValueError(f"非法面试结果状态 {outcome!r}，允许枚举：{VALID_INTERVIEW_OUTCOMES}")
+    return oc
 
 
 def _parse_risk_tags(val: Any) -> list[str]:
@@ -151,30 +213,51 @@ def _milestone_updates_for_status(
     """按严格四态规则维护里程碑时间戳，并在误标状态往回修正时清理超前时间戳（防止误扣当日配额或虚增简历送达数）。"""
     prev = existing or {}
     milestones = {
+        "favorited_at": prev.get("favorited_at"),
         "opening_sent_at": prev.get("opening_sent_at"),
         "connected_at": prev.get("connected_at"),
         "resume_requested_at": prev.get("resume_requested_at"),
         "resume_delivered_at": prev.get("resume_delivered_at"),
         "handed_off_at": prev.get("handed_off_at"),
+        "interview_scheduled_at": prev.get("interview_scheduled_at"),
+        "offer_at": prev.get("offer_at"),
         "closed_at": prev.get("closed_at"),
     }
     if status == "discovered":
         return {
+            "favorited_at": None,
             "opening_sent_at": None,
             "connected_at": None,
             "resume_requested_at": None,
             "resume_delivered_at": None,
             "handed_off_at": None,
+            "interview_scheduled_at": None,
+            "offer_at": None,
+            "closed_at": None,
+        }
+    if status == "favorited":
+        return {
+            "favorited_at": milestones["favorited_at"] or ts,
+            "opening_sent_at": None,
+            "connected_at": None,
+            "resume_requested_at": None,
+            "resume_delivered_at": None,
+            "handed_off_at": None,
+            "interview_scheduled_at": None,
+            "offer_at": None,
             "closed_at": None,
         }
     if status == "screened_skip":
-        # 若此前已在招聘平台真实发出过开场打招呼（opening_sent_at 非空），保留时间戳以防重置当日平台配额计数
+        # 若此前已在招聘平台真实发出过开场打招呼或自动收藏，保留时间戳以防重置当日平台配额计数
         return {
+            "favorited_at": milestones["favorited_at"],
             "opening_sent_at": milestones["opening_sent_at"],
             "connected_at": None,
             "resume_requested_at": None,
             "resume_delivered_at": None,
             "handed_off_at": None,
+            "interview_scheduled_at": None,
+            "offer_at": None,
             "closed_at": ts,
         }
     if status == "opening_sent":
@@ -183,6 +266,8 @@ def _milestone_updates_for_status(
         milestones["resume_requested_at"] = None
         milestones["resume_delivered_at"] = None
         milestones["handed_off_at"] = None
+        milestones["interview_scheduled_at"] = None
+        milestones["offer_at"] = None
         milestones["closed_at"] = None
     elif status == "connected":
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
@@ -190,6 +275,8 @@ def _milestone_updates_for_status(
         milestones["resume_requested_at"] = None
         milestones["resume_delivered_at"] = None
         milestones["handed_off_at"] = None
+        milestones["interview_scheduled_at"] = None
+        milestones["offer_at"] = None
         milestones["closed_at"] = None
     elif status == "resume_requested":
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
@@ -198,20 +285,35 @@ def _milestone_updates_for_status(
         # 严格规则：仅发起请求或从误标状态回退时，绝不保留 resume_delivered_at！
         milestones["resume_delivered_at"] = None
         milestones["handed_off_at"] = None
+        milestones["interview_scheduled_at"] = None
+        milestones["offer_at"] = None
         milestones["closed_at"] = None
     elif status == "resume_delivered":
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
         milestones["connected_at"] = milestones["connected_at"] or ts
         milestones["resume_delivered_at"] = milestones["resume_delivered_at"] or ts
         milestones["handed_off_at"] = None
+        milestones["interview_scheduled_at"] = None
+        milestones["offer_at"] = None
         milestones["closed_at"] = None
     elif status == "handed_off":
         milestones["handed_off_at"] = milestones["handed_off_at"] or ts
+        milestones["interview_scheduled_at"] = None
+        milestones["offer_at"] = None
         milestones["closed_at"] = None
-    elif status == "interview_scheduled":
+    elif status in ("interview_scheduled", "interviewing"):
         milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
         milestones["connected_at"] = milestones["connected_at"] or ts
         milestones["handed_off_at"] = milestones["handed_off_at"] or ts
+        milestones["interview_scheduled_at"] = milestones["interview_scheduled_at"] or ts
+        milestones["offer_at"] = None
+        milestones["closed_at"] = None
+    elif status in ("offer", "offer_accepted"):
+        milestones["opening_sent_at"] = milestones["opening_sent_at"] or ts
+        milestones["connected_at"] = milestones["connected_at"] or ts
+        milestones["handed_off_at"] = milestones["handed_off_at"] or ts
+        milestones["interview_scheduled_at"] = milestones["interview_scheduled_at"] or ts
+        milestones["offer_at"] = milestones["offer_at"] or ts
         milestones["closed_at"] = None
     elif status == "closed_rejected":
         milestones["closed_at"] = milestones["closed_at"] or ts
@@ -222,6 +324,12 @@ def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = dict(row)
     data["risk_tags"] = _parse_risk_tags(data.get("risk_tags"))
     data["status_label"] = STATUS_LABELS.get(data["status"], data["status"])
+    return data
+
+
+def _round_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    data["outcome_label"] = INTERVIEW_OUTCOME_LABELS.get(data.get("outcome", ""), data.get("outcome", ""))
     return data
 
 
@@ -259,7 +367,13 @@ class JobLedger:
                 row = conn.execute(
                     "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
                 ).fetchone()
-                if row and row["sql"] and "interview_scheduled" not in str(row["sql"]):
+                table_sql = str(row["sql"]) if (row and row["sql"]) else ""
+                if table_sql and (
+                    any(f"'{st}'" not in table_sql for st in VALID_STATUSES)
+                    or "favorited_at" not in table_sql
+                    or "interview_scheduled_at" not in table_sql
+                    or "offer_at" not in table_sql
+                ):
                     try:
                         _shutil.copy2(self.db_path, self.db_path.with_suffix(".sqlite3.pre_mig_bak"))
                     except OSError:
@@ -363,11 +477,14 @@ class JobLedger:
             "resume_used": pick_str("resume_used"),
             "job_url": pick_str("job_url"),
             "note": pick_str("note"),
+            "favorited_at": milestones["favorited_at"],
             "opening_sent_at": milestones["opening_sent_at"],
             "connected_at": milestones["connected_at"],
             "resume_requested_at": milestones["resume_requested_at"],
             "resume_delivered_at": milestones["resume_delivered_at"],
             "handed_off_at": milestones["handed_off_at"],
+            "interview_scheduled_at": milestones["interview_scheduled_at"],
+            "offer_at": milestones["offer_at"],
             "closed_at": milestones["closed_at"],
             "created_at": existing["created_at"] if existing else ts,
             "updated_at": ts,
@@ -381,16 +498,18 @@ class JobLedger:
                     company_scale, business_nature, title, title_norm, salary, city,
                     recruiter_name, recruiter_title, channel, risk_tags,
                     match_reasons, gaps, icebreaker, status, resume_used,
-                    job_url, note, opening_sent_at, connected_at,
-                    resume_requested_at, resume_delivered_at, handed_off_at, closed_at,
+                    job_url, note, favorited_at, opening_sent_at, connected_at,
+                    resume_requested_at, resume_delivered_at, handed_off_at,
+                    interview_scheduled_at, offer_at, closed_at,
                     created_at, updated_at
                 ) VALUES (
                     :job_id, :platform, :company, :company_clean, :company_core,
                     :company_scale, :business_nature, :title, :title_norm, :salary, :city,
                     :recruiter_name, :recruiter_title, :channel, :risk_tags,
                     :match_reasons, :gaps, :icebreaker, :status, :resume_used,
-                    :job_url, :note, :opening_sent_at, :connected_at,
-                    :resume_requested_at, :resume_delivered_at, :handed_off_at, :closed_at,
+                    :job_url, :note, :favorited_at, :opening_sent_at, :connected_at,
+                    :resume_requested_at, :resume_delivered_at, :handed_off_at,
+                    :interview_scheduled_at, :offer_at, :closed_at,
                     :created_at, :updated_at
                 )
                 ON CONFLICT(job_id) DO UPDATE SET
@@ -415,11 +534,14 @@ class JobLedger:
                     resume_used = excluded.resume_used,
                     job_url = excluded.job_url,
                     note = excluded.note,
+                    favorited_at = excluded.favorited_at,
                     opening_sent_at = excluded.opening_sent_at,
                     connected_at = excluded.connected_at,
                     resume_requested_at = excluded.resume_requested_at,
                     resume_delivered_at = excluded.resume_delivered_at,
                     handed_off_at = excluded.handed_off_at,
+                    interview_scheduled_at = excluded.interview_scheduled_at,
+                    offer_at = excluded.offer_at,
                     closed_at = excluded.closed_at,
                     updated_at = excluded.updated_at
                 """,
@@ -546,11 +668,14 @@ class JobLedger:
                     status = ?,
                     resume_used = ?,
                     note = ?,
+                    favorited_at = ?,
                     opening_sent_at = ?,
                     connected_at = ?,
                     resume_requested_at = ?,
                     resume_delivered_at = ?,
                     handed_off_at = ?,
+                    interview_scheduled_at = ?,
+                    offer_at = ?,
                     closed_at = ?,
                     updated_at = ?
                 WHERE job_id = ?
@@ -559,11 +684,14 @@ class JobLedger:
                     target_status,
                     final_resume,
                     final_note,
+                    milestones["favorited_at"],
                     milestones["opening_sent_at"],
                     milestones["connected_at"],
                     milestones["resume_requested_at"],
                     milestones["resume_delivered_at"],
                     milestones["handed_off_at"],
+                    milestones["interview_scheduled_at"],
+                    milestones["offer_at"],
                     milestones["closed_at"],
                     ts,
                     job_id,
@@ -593,6 +721,244 @@ class JobLedger:
             )
         return res
 
+    def _resolve_existing_job(
+        self,
+        *,
+        job_id: str = "",
+        company: str | None = None,
+        title: str | None = None,
+    ) -> dict[str, Any] | None:
+        clean_id = (job_id or "").strip()
+        if clean_id:
+            found = self.get_job(clean_id)
+            if found:
+                return found
+        if company and company.strip():
+            comp_q = company.strip()
+            title_q = (title or "").strip()
+            candidates = [
+                r for r in self.list_jobs(limit=500) if companies_match(str(r.get("company") or ""), comp_q)
+            ]
+            if candidates:
+                if title_q:
+                    best = max(candidates, key=lambda r: title_similarity(str(r.get("title") or ""), title_q))
+                    if title_similarity(str(best.get("title") or ""), title_q) >= 0.50:
+                        return best
+                elif len(candidates) == 1:
+                    return candidates[0]
+                else:
+                    active_cands = [r for r in candidates if r.get("status") not in ("screened_skip", "closed_rejected")]
+                    if len(active_cands) == 1:
+                        return active_cands[0]
+                    return candidates[0]
+        return None
+
+    def get_interview_round(self, round_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM interview_rounds WHERE round_id = ?", (round_id,)).fetchone()
+            return _round_row_to_dict(row) if row else None
+
+    def add_interview_round(
+        self,
+        *,
+        job_id: str = "",
+        company: str | None = None,
+        title: str | None = None,
+        round_label: str = "一面",
+        scheduled_at: str = "",
+        mode: str = "",
+        interviewer: str = "",
+        outcome: str = "pending",
+        summary: str = "",
+        auto_advance_status: bool = True,
+        timestamp: str | None = None,
+    ) -> dict[str, Any]:
+        """新增一条面试轮次记录；支持按 job_id 或公司名定位（未建档时自动建档），并按需自动推进岗位面试状态。"""
+        oc = _validate_interview_outcome(outcome)
+        ts = timestamp or now_iso()
+        label = (round_label or "").strip() or "一面"
+
+        existing = self._resolve_existing_job(job_id=job_id, company=company, title=title)
+        auto_created_job = False
+        if not existing:
+            if company and company.strip():
+                init_status = "interviewing" if any(k in label for k in ("二面", "三面", "四面", "终面", "HR", "hr")) else "interview_scheduled"
+                up_res = self.upsert_job({
+                    "job_id": (job_id or "").strip() or None,
+                    "company": company.strip(),
+                    "title": (title or "").strip() or "面试跟进岗位",
+                    "channel": "inbound",
+                    "status": init_status,
+                    "note": f"已记录{label}" + (f"（{scheduled_at.strip()}）" if scheduled_at.strip() else ""),
+                    "timestamp": ts,
+                    "notify_desktop": False,
+                })
+                existing = up_res["job"]
+                auto_created_job = True
+            else:
+                raise KeyError(f"未找到 job_id={job_id!r} 的岗位记录（也可传入 --company 自动定位或建档）")
+
+        resolved_job_id = str(existing["job_id"])
+        existing_rounds = self.list_interview_rounds(job_id=resolved_job_id)
+        round_id = f"iv_{uuid.uuid4().hex[:10]}"
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO interview_rounds (
+                    round_id, job_id, round_label, scheduled_at, mode,
+                    interviewer, outcome, summary, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    round_id,
+                    resolved_job_id,
+                    label,
+                    (scheduled_at or "").strip(),
+                    (mode or "").strip(),
+                    (interviewer or "").strip(),
+                    oc,
+                    (summary or "").strip(),
+                    ts,
+                    ts,
+                ),
+            )
+            conn.execute("UPDATE jobs SET updated_at = ? WHERE job_id = ?", (ts, resolved_job_id))
+
+        status_transition: dict[str, Any] | None = None
+        if auto_advance_status and not auto_created_job:
+            cur_st = str(existing.get("status") or "")
+            is_later_round = len(existing_rounds) >= 1 or any(
+                k in label for k in ("二面", "三面", "四面", "终面", "HR", "hr", "总监", "VP")
+            )
+            target_st: str | None = None
+            if cur_st not in INTERVIEW_STAGE_STATUSES and cur_st != "closed_rejected":
+                target_st = "interviewing" if is_later_round else "interview_scheduled"
+            elif cur_st == "interview_scheduled" and (is_later_round or oc == "passed"):
+                target_st = "interviewing"
+            if target_st and target_st != cur_st:
+                note_parts = [f"新增面试轮次：{label}"]
+                if scheduled_at.strip():
+                    note_parts.append(scheduled_at.strip())
+                if mode.strip():
+                    note_parts.append(mode.strip())
+                status_transition = self.transition(
+                    job_id=resolved_job_id,
+                    to_status=target_st,
+                    note=" · ".join(note_parts),
+                    timestamp=ts,
+                    notify_desktop=False,
+                )
+
+        round_rec = self.get_interview_round(round_id)
+        updated_job = self.get_job(resolved_job_id)
+        return {
+            "ok": True,
+            "auto_created_job": auto_created_job,
+            "interview_round": round_rec,
+            "job": updated_job,
+            **(
+                {"status_transition": {"from_status": status_transition["from_status"], "to_status": status_transition["to_status"]}}
+                if status_transition
+                else {}
+            ),
+        }
+
+    def update_interview_round(
+        self,
+        round_id: str,
+        *,
+        round_label: str | None = None,
+        scheduled_at: str | None = None,
+        mode: str | None = None,
+        interviewer: str | None = None,
+        outcome: str | None = None,
+        summary: str | None = None,
+        timestamp: str | None = None,
+    ) -> dict[str, Any]:
+        """更新指定面试轮次的时间、方式、面试官、结果或面经复盘。"""
+        existing = self.get_interview_round((round_id or "").strip())
+        if not existing:
+            raise KeyError(f"未找到 round_id={round_id!r} 的面试轮次记录")
+        ts = timestamp or now_iso()
+        new_label = round_label.strip() if (round_label is not None and round_label.strip()) else existing["round_label"]
+        new_sched = scheduled_at.strip() if scheduled_at is not None else existing["scheduled_at"]
+        new_mode = mode.strip() if mode is not None else existing["mode"]
+        new_iv = interviewer.strip() if interviewer is not None else existing["interviewer"]
+        new_outcome = _validate_interview_outcome(outcome) if outcome is not None else existing["outcome"]
+        if summary is not None:
+            new_summary = summary.strip()
+        else:
+            new_summary = existing["summary"]
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE interview_rounds SET
+                    round_label = ?,
+                    scheduled_at = ?,
+                    mode = ?,
+                    interviewer = ?,
+                    outcome = ?,
+                    summary = ?,
+                    updated_at = ?
+                WHERE round_id = ?
+                """,
+                (new_label, new_sched, new_mode, new_iv, new_outcome, new_summary, ts, existing["round_id"]),
+            )
+            conn.execute("UPDATE jobs SET updated_at = ? WHERE job_id = ?", (ts, existing["job_id"]))
+
+        updated_round = self.get_interview_round(existing["round_id"])
+        updated_job = self.get_job(existing["job_id"])
+        return {
+            "ok": True,
+            "interview_round": updated_round,
+            "job": updated_job,
+        }
+
+    def list_interview_rounds(
+        self,
+        *,
+        job_id: str | None = None,
+        outcome: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if job_id and job_id.strip():
+            clauses.append("job_id = ?")
+            params.append(job_id.strip())
+        if outcome and outcome.strip():
+            oc = _validate_interview_outcome(outcome)
+            clauses.append("outcome = ?")
+            params.append(oc)
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = f"SELECT * FROM interview_rounds {where_sql} ORDER BY created_at ASC, rowid ASC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [_round_row_to_dict(r) for r in rows]
+
+    def get_rounds_by_job_ids(self, job_ids: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
+        with self._connect() as conn:
+            if job_ids is None:
+                rows = conn.execute(
+                    "SELECT * FROM interview_rounds ORDER BY created_at ASC, rowid ASC"
+                ).fetchall()
+            elif not job_ids:
+                return {}
+            else:
+                placeholders = ",".join("?" for _ in job_ids)
+                rows = conn.execute(
+                    f"SELECT * FROM interview_rounds WHERE job_id IN ({placeholders}) ORDER BY created_at ASC, rowid ASC",
+                    job_ids,
+                ).fetchall()
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            d = _round_row_to_dict(row)
+            grouped.setdefault(str(d["job_id"]), []).append(d)
+        return grouped
+
     def check_duplicate(
         self,
         *,
@@ -602,10 +968,11 @@ class JobLedger:
         blocked_companies: list[str] | None = None,
         past_employers: list[str] | None = None,
         chat_already_open: bool = False,
+        already_favorited: bool = False,
         filter_outsourcing: bool = True,
         filter_onsite: bool = True,
     ) -> dict[str, Any]:
-        """三维查重：1. 归一化公司比对（含前东家黑名单） 2. 岗位名相似度 3. 网页已有会话与同公司在聊/按当前偏好生效的公司级排雷记录。"""
+        """三维查重：1. 归一化公司比对（含前东家黑名单） 2. 岗位名相似度 3. 网页已有会话/已收藏与同公司在聊/按当前偏好生效的公司级排雷记录。"""
         clean_c, core_c = normalize_company_parts(company)
         norm_t = normalize_title(title)
 
@@ -622,8 +989,10 @@ class JobLedger:
                     "company_clean": clean_name_or_core(clean_c, core_c),
                     "normalized_title": norm_t,
                     "same_company_active": False,
+                    "same_company_favorited": False,
                     "same_company_skipped": False,
                     "chat_already_open": chat_already_open,
+                    "already_favorited": already_favorited,
                     "max_title_similarity": 0.0,
                     "reason": f"命中{'前东家/现东家' if is_former else '屏蔽企业'}黑名单：{blk}",
                     "warnings": [],
@@ -640,10 +1009,32 @@ class JobLedger:
                 "company_clean": clean_name_or_core(clean_c, core_c),
                 "normalized_title": norm_t,
                 "same_company_active": True,
+                "same_company_favorited": False,
                 "same_company_skipped": False,
                 "chat_already_open": True,
+                "already_favorited": already_favorited,
                 "max_title_similarity": 1.0,
                 "reason": "BOSS 网页已存在与该招聘者/岗位的历史会话（按钮显示“继续沟通”或聊天列表已存在）",
+                "warnings": [],
+                "matches": [],
+            }
+
+        if already_favorited:
+            return {
+                "ok": True,
+                "duplicate": True,
+                "blocked_employer": False,
+                "blocked_company_hit": None,
+                "normalized_company": core_c,
+                "company_clean": clean_name_or_core(clean_c, core_c),
+                "normalized_title": norm_t,
+                "same_company_active": False,
+                "same_company_favorited": True,
+                "same_company_skipped": False,
+                "chat_already_open": False,
+                "already_favorited": True,
+                "max_title_similarity": 1.0,
+                "reason": "BOSS 网页显示该职位已处于「已感兴趣/收藏」状态，跳过以防误点取消收藏",
                 "warnings": [],
                 "matches": [],
             }
@@ -655,6 +1046,8 @@ class JobLedger:
         warnings: list[str] = []
         max_sim = 0.0
         same_company_active = False
+        same_company_favorited = False
+        favorited_similar_role = False
         same_company_skipped = False
         company_level_skipped = False
         exact_or_similar_role = False
@@ -673,6 +1066,8 @@ class JobLedger:
             st = row["status"]
             if st in ACTIVE_CHAT_STATUSES:
                 same_company_active = True
+            if st == "favorited":
+                same_company_favorited = True
             if st in ("screened_skip", "closed_rejected"):
                 same_company_skipped = True
                 raw_meta = f"{row['business_nature'] or ''} {row['risk_tags'] or ''} {row['note'] or ''}".lower()
@@ -682,6 +1077,8 @@ class JobLedger:
             sim_threshold = 0.68 if st == "screened_skip" else 0.55
             if sim >= sim_threshold:
                 exact_or_similar_role = True
+                if st == "favorited":
+                    favorited_similar_role = True
                 if recruiter and row["recruiter_name"] and recruiter.strip() != row["recruiter_name"].strip():
                     recruiter_changed_repost = True
 
@@ -702,6 +1099,8 @@ class JobLedger:
         reasons: list[str] = []
         if recruiter_changed_repost:
             reasons.append("检测到同公司换招聘者重发相似岗位（防连投社死拦截）")
+        elif favorited_similar_role:
+            reasons.append(f"同公司相同或高度相似岗位已在收藏待投递列表中（相似度 {max_sim:.2f}）")
         elif exact_or_similar_role:
             reasons.append(f"同公司存在相同或高度相似岗位记录（相似度 {max_sim:.2f}）")
         if same_company_active:
@@ -720,9 +1119,11 @@ class JobLedger:
             "company_clean": clean_name_or_core(clean_c, core_c),
             "normalized_title": norm_t,
             "same_company_active": same_company_active,
+            "same_company_favorited": same_company_favorited,
             "same_company_skipped": same_company_skipped,
             "company_level_skipped": company_level_skipped,
             "chat_already_open": False,
+            "already_favorited": False,
             "max_title_similarity": max_sim,
             "reason": "；".join(reasons) if reasons else "未命中重复记录",
             "warnings": warnings,
@@ -735,6 +1136,7 @@ class JobLedger:
         status: str | None = None,
         search: str | None = None,
         limit: int = 200,
+        include_interviews: bool = False,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -757,31 +1159,60 @@ class JobLedger:
 
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        items = [_row_to_dict(r) for r in rows]
+        if include_interviews and items:
+            rounds_map = self.get_rounds_by_job_ids([str(it["job_id"]) for it in items])
+            for it in items:
+                it["interviews"] = rounds_map.get(str(it["job_id"]), [])
+        return items
 
     def summary(self, local_date_prefix: str | None = None) -> dict[str, Any]:
         today_prefix = local_date_prefix or datetime.now().strftime("%Y-%m-%d")
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM jobs").fetchall()
+            round_rows = conn.execute("SELECT job_id, outcome FROM interview_rounds").fetchall()
 
         by_status = {st: 0 for st in VALID_STATUSES}
+        favorited_total = 0
         opening_delivered_total = 0
         connected_total = 0
         pdf_delivered_total = 0
+        interview_total = 0
+        today_favorited = 0
         today_opening_sent = 0
+        today_outbound_actions = 0
+
+        jobs_with_rounds = {str(r["job_id"]) for r in round_rows}
+        upcoming_interviews_count = sum(1 for r in round_rows if r["outcome"] == "pending")
 
         for row in rows:
             st = row["status"]
             by_status[st] = by_status.get(st, 0) + 1
 
-            has_opening = bool(row["opening_sent_at"]) or st in (
-                "opening_sent", "connected", "resume_requested", "resume_delivered", "handed_off", "interview_scheduled"
-            )
+            fav_ts = row["favorited_at"] or ""
+            op_ts = row["opening_sent_at"] or ""
+            if st == "favorited" or bool(fav_ts):
+                favorited_total += 1
+            if fav_ts.startswith(today_prefix):
+                today_favorited += 1
+            if op_ts.startswith(today_prefix):
+                today_opening_sent += 1
+            if fav_ts.startswith(today_prefix) or op_ts.startswith(today_prefix):
+                today_outbound_actions += 1
+
+            has_opening = bool(op_ts) or st in ACTIVE_CHAT_STATUSES
             if has_opening:
                 opening_delivered_total += 1
 
             has_connected = bool(row["connected_at"]) or st in (
-                "connected", "resume_requested", "resume_delivered", "handed_off", "interview_scheduled"
+                "connected",
+                "resume_requested",
+                "resume_delivered",
+                "handed_off",
+                "interview_scheduled",
+                "interviewing",
+                "offer",
+                "offer_accepted",
             )
             if has_connected:
                 connected_total += 1
@@ -791,9 +1222,16 @@ class JobLedger:
             if has_pdf_delivered:
                 pdf_delivered_total += 1
 
-            op_ts = row["opening_sent_at"] or ""
-            if op_ts.startswith(today_prefix):
-                today_opening_sent += 1
+            has_interview = (
+                st in INTERVIEW_STAGE_STATUSES
+                or bool(row["interview_scheduled_at"])
+                or str(row["job_id"]) in jobs_with_rounds
+            )
+            if has_interview:
+                interview_total += 1
+
+        interview_active_total = by_status["interview_scheduled"] + by_status["interviewing"]
+        offer_count = by_status["offer"] + by_status["offer_accepted"]
 
         return {
             "ok": True,
@@ -803,6 +1241,8 @@ class JobLedger:
                 "screened_total": len(rows),
                 "screened_skip": by_status["screened_skip"],
                 "discovered_pending": by_status["discovered"],
+                "favorited_pending": by_status["favorited"],
+                "favorited_total": favorited_total,
                 "opening_delivered_total": opening_delivered_total,
                 "opening_waiting_reply": by_status["opening_sent"],
                 "connected_total": connected_total,
@@ -811,14 +1251,23 @@ class JobLedger:
                 "pdf_delivered_total": pdf_delivered_total,
                 "handed_off_pending": by_status["handed_off"],
                 "interview_scheduled": by_status["interview_scheduled"],
+                "interviewing": by_status["interviewing"],
+                "interview_active_total": interview_active_total,
+                "interview_total": interview_total,
+                "upcoming_interviews_count": upcoming_interviews_count,
+                "offer_pending": by_status["offer"],
+                "offer_accepted": by_status["offer_accepted"],
+                "offer_count": offer_count,
                 "closed_rejected": by_status["closed_rejected"],
             },
             "today_date": today_prefix,
+            "today_favorited": today_favorited,
             "today_opening_sent": today_opening_sent,
+            "today_outbound_actions": today_outbound_actions,
         }
 
     def _export_rows_and_headers(self) -> tuple[list[str], list[list[object]]]:
-        jobs = self.list_jobs(limit=10000)
+        jobs = self.list_jobs(limit=10000, include_interviews=True)
         headers = [
             "岗位ID",
             "当前状态",
@@ -835,12 +1284,25 @@ class JobLedger:
             "匹配依据",
             "待确认缺口",
             "已投简历版本",
+            "面试轮次记录",
             "最新备注",
             "岗位链接",
             "更新时间",
         ]
         rows: list[list[object]] = []
         for item in jobs:
+            rounds = item.get("interviews") or []
+            iv_summary_parts: list[str] = []
+            for rd in rounds:
+                meta_bits = [str(rd.get("outcome_label") or rd.get("outcome") or "")]
+                if rd.get("scheduled_at"):
+                    meta_bits.append(str(rd["scheduled_at"]))
+                if rd.get("mode"):
+                    meta_bits.append(str(rd["mode"]))
+                piece = f"{rd.get('round_label', '面试')}({' '.join(x for x in meta_bits if x)})"
+                if rd.get("summary"):
+                    piece += f"：{rd['summary']}"
+                iv_summary_parts.append(piece)
             rows.append([
                 item["job_id"],
                 item["status_label"],
@@ -857,6 +1319,7 @@ class JobLedger:
                 item["match_reasons"],
                 item["gaps"],
                 item["resume_used"],
+                " → ".join(iv_summary_parts),
                 item["note"],
                 item["job_url"],
                 item["updated_at"],

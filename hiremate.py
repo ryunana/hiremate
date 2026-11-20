@@ -37,7 +37,7 @@ OPEN_ROOT = Path(__file__).resolve().parent
 if str(OPEN_ROOT) not in sys.path:
     sys.path.insert(0, str(OPEN_ROOT))
 
-from hiremate_lib import __version__, client, dashboard, ledger, updater, workspace  # noqa: E402
+from hiremate_lib import __version__, client, dashboard, ledger, mcp_server, updater, voice, workspace  # noqa: E402
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -212,6 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=workspace.VALID_RESUME_SOURCES,
         help="简历来源形态：attachment_pdf=本地/线上PDF附件，online_only=仅平台在线简历无附件，both=在线+附件齐全，none=暂无任何简历",
     )
+    p_init.add_argument(
+        "--mode-discover",
+        choices=workspace.VALID_DISCOVER_MODES,
+        help="筛出好岗后的默认动作：semi=半自动审阅单（默认），favorite=仅自动点击感兴趣收藏不主动投递，auto=全自动定额破冰（需Pro）",
+    )
     p_init.add_argument("--force", action="store_true", help="重置求职偏好配置（默认自动备份并保留前东家黑名单与已填档案）")
     p_init.add_argument(
         "--reset-profile",
@@ -244,8 +249,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_cfg_set = cfg_sub.add_parser("set", help="更新一项或多项求职偏好配置")
     p_cfg_set.add_argument("--account-name", help="招聘平台本人显示名")
-    p_cfg_set.add_argument("--mode-discover", choices=("semi", "auto"), help="主动找岗档位：semi=半自动确认，auto=全自动送达")
-    p_cfg_set.add_argument("--mode-reply", choices=("semi", "auto"), help="消息回复档位：semi=半自动确认，auto=全自动跟进")
+    p_cfg_set.add_argument(
+        "--mode-discover",
+        choices=workspace.VALID_DISCOVER_MODES,
+        help="主动找岗档位：semi=半自动确认，favorite=仅自动收藏不主动投递，auto=全自动送达（需Pro）",
+    )
+    p_cfg_set.add_argument("--mode-reply", choices=workspace.VALID_REPLY_MODES, help="消息回复档位：semi=半自动确认，auto=全自动跟进")
     p_cfg_set.add_argument("--roles", help="目标岗位关键词（逗号分隔）")
     p_cfg_set.add_argument("--cities", help="优先城市（逗号分隔）")
     p_cfg_set.add_argument(
@@ -264,6 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=workspace.VALID_SALARY_MATCH_MODES,
         help="薪资区间匹配口径：ceiling_tolerant / ceiling_strict / floor_strict",
     )
+    p_cfg_set.add_argument("--employers", help="设置或更新过往/当前雇主列表（逗号分隔，自动同步至防误投黑名单）")
     p_cfg_set.add_argument("--blocked-companies", help="设置额外屏蔽企业列表（逗号分隔，前东家仍自动保留保护）")
     p_cfg_set.add_argument("--exclude-keywords", help="设置岗位排除关键词列表（逗号分隔）")
     p_cfg_set.add_argument("--headhunter-policy", choices=workspace.VALID_HEADHUNTER_POLICIES)
@@ -340,11 +350,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="若 BOSS 网页按钮已显示“继续沟通”或聊天列表已有会话则传入此标记",
     )
+    p_dup.add_argument(
+        "--already-favorited",
+        action="store_true",
+        help="若 BOSS 网页详情页收藏按钮已显示“取消感兴趣/已感兴趣”则传入此标记，防误点取消收藏",
+    )
 
     p_up = led_sub.add_parser("upsert-job", help="新增或更新一条岗位记录")
     p_up.add_argument("--job-json", required=True, help="岗位 JSON 字符串或 @文件路径")
 
-    p_tr = led_sub.add_parser("transition", help="流转岗位四态（支持 --job-id 精确流转，或传 --company/--title 自动定位/建档）")
+    p_tr = led_sub.add_parser("transition", help="流转岗位状态（支持 --job-id 精确流转，或传 --company/--title 自动定位/建档）")
     p_tr.add_argument("--job-id", default="", help="岗位记录 ID（若为新被动会话未知 ID，可改传 --company 与 --title）")
     p_tr.add_argument("--company", help="公司名称（未传或找不到 --job-id 时用于自动定位或补建账本记录）")
     p_tr.add_argument("--title", help="岗位名称（配合 --company 使用）")
@@ -353,6 +368,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--note", help="状态变更备注")
     p_tr.add_argument("--resume-used", help="本次实际投递或请求的简历文件名")
     p_tr.add_argument("--no-notify", action="store_true", help="流转至 handed_off 时跳过桌面系统通知弹窗")
+    p_tr.add_argument("--round", dest="interview_round", help="可选：顺手记录面试轮次（如 一面 / 二面 / 终面 / HR面）")
+    p_tr.add_argument("--interview-time", help="可选：面试时间（如 2026-11-21 14:00）")
+    p_tr.add_argument("--interview-mode", help="可选：面试方式或地点（如 腾讯会议 / 现场面试 / 电话）")
+    p_tr.add_argument("--interviewer", help="可选：面试官称呼或头衔")
+    p_tr.add_argument(
+        "--interview-outcome",
+        default="pending",
+        choices=ledger.VALID_INTERVIEW_OUTCOMES,
+        help="可选：本轮面试结果（pending/passed/failed/cancelled）",
+    )
+    p_tr.add_argument("--interview-summary", help="可选：本轮面试复盘或重点记录")
+
+    p_iv_add = led_sub.add_parser("interview-add", help="新增一条面试轮次记录（可按 --job-id 或 --company 定位，默认自动推进面试状态）")
+    p_iv_add.add_argument("--job-id", default="", help="岗位记录 ID")
+    p_iv_add.add_argument("--company", help="公司名称（未传 --job-id 时自动定位或补建）")
+    p_iv_add.add_argument("--title", help="岗位名称（配合 --company 使用）")
+    p_iv_add.add_argument("--round", dest="round_label", default="一面", help="面试轮次名称（如 一面 / 二面 / 终面 / HR面）")
+    p_iv_add.add_argument("--time", dest="scheduled_at", default="", help="面试时间（如 2026-11-21 14:00）")
+    p_iv_add.add_argument("--mode", default="", help="面试方式或地点（如 腾讯会议 / 现场面试）")
+    p_iv_add.add_argument("--interviewer", default="", help="面试官称呼或头衔")
+    p_iv_add.add_argument("--outcome", default="pending", choices=ledger.VALID_INTERVIEW_OUTCOMES, help="面试结果状态")
+    p_iv_add.add_argument("--summary", default="", help="面经复盘、考察重点或反馈摘要")
+    p_iv_add.add_argument("--no-auto-advance", action="store_true", help="仅新增轮次，不自动推进岗位状态")
+
+    p_iv_upd = led_sub.add_parser("interview-update", help="更新指定面试轮次的结果、时间或面经复盘")
+    p_iv_upd.add_argument("--round-id", required=True, help="面试轮次 ID（iv_...）")
+    p_iv_upd.add_argument("--round", dest="round_label", help="修改轮次名称")
+    p_iv_upd.add_argument("--time", dest="scheduled_at", help="修改面试时间")
+    p_iv_upd.add_argument("--mode", help="修改面试方式或地点")
+    p_iv_upd.add_argument("--interviewer", help="修改面试官称呼或头衔")
+    p_iv_upd.add_argument("--outcome", choices=ledger.VALID_INTERVIEW_OUTCOMES, help="更新结果（pending/passed/failed/cancelled）")
+    p_iv_upd.add_argument("--summary", help="更新或补充面经复盘")
+
+    p_iv_ls = led_sub.add_parser("interview-list", help="列出面试轮次记录")
+    p_iv_ls.add_argument("--job-id", help="按岗位 ID 过滤")
+    p_iv_ls.add_argument("--outcome", choices=ledger.VALID_INTERVIEW_OUTCOMES, help="按结果状态过滤")
+    p_iv_ls.add_argument("--limit", type=int, default=200)
 
     p_ls = led_sub.add_parser("list", help="按状态或关键词列出岗位记录")
     p_ls.add_argument("--status", choices=ledger.VALID_STATUSES)
@@ -450,6 +502,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="更新源选择（默认 auto：优先走 Gitee 主源，超时或异常时自动切换 GitHub 备源）",
     )
 
+    # 9. voice (个人求职语气档案：从本机 Agent 历史会话提炼本人行文风格，驱动破冰与答疑去模板化)
+    p_voice = sub.add_parser(
+        "voice",
+        help="管理个人求职语气档案（从本机 Agent 历史对话提取行文风格、查看、保存、记录改稿偏好）",
+    )
+    voice_sub = p_voice.add_subparsers(dest="voice_cmd", required=True)
+
+    voice_sub.add_parser("show", help="读取当前个人求职语气档案全文与状态（未建档时静默降级不报错）")
+
+    p_vc_collect = voice_sub.add_parser(
+        "collect",
+        help="扫描本机桌面 Agent 历史对话记录，去噪抽样生成求职语气学习素材 voice_corpus.md",
+    )
+    p_vc_collect.add_argument(
+        "--hosts",
+        default="auto",
+        help="扫描宿主列表（默认 auto 扫描全部已安装宿主；也可逗号分隔传 dsh,claude,codex,antigravity,workbuddy）",
+    )
+    p_vc_collect.add_argument("--days", type=int, default=120, help="回溯最近多少天的会话记录（默认 120 天）")
+    p_vc_collect.add_argument("--max-chars", type=int, default=36000, help="提取样本总字数上限（默认 36000 字）")
+
+    p_vc_save = voice_sub.add_parser("save", help="保存或整份更新个人求职语气档案 voice_profile.md")
+    p_vc_save.add_argument("--text", help="语气档案完整 Markdown 正文（须以 `# ` 一级标题开头）")
+    p_vc_save.add_argument("--from-file", help="从指定 Markdown 文件读取并保存为语气档案")
+
+    p_vc_note = voice_sub.add_parser(
+        "note",
+        help="在「审阅与改稿中学到的」小节追加一条用户措辞纠偏（如半自动审阅改稿习惯）",
+    )
+    p_vc_note.add_argument("note_text", nargs="?", default="", help="一条简明具体的措辞观察（写清原句与用户改法）")
+    p_vc_note.add_argument("--text", dest="note_flag_text", help="可选通过 --text 传入观察内容")
+
+    p_vc_clear = voice_sub.add_parser("clear", help="清除本机语气学习临时语料或整份语气档案")
+    p_vc_clear.add_argument("--corpus-only", action="store_true", help="仅删除抽样语料 voice_corpus.md，保留已生成的语气档案")
+
+    # 10. mcp-serve (供 Codex 等支持 MCP Apps 侧边栏面板的宿主挂载 stdio 服务)
+    sub.add_parser("mcp-serve", help="启动零外部依赖的本地 MCP App stdio 服务（为 Codex 等宿主提供左侧栏求职看板面板）")
+
     return parser
 
 
@@ -484,6 +574,7 @@ def main(argv: list[str] | None = None) -> int:
                 execution_mode=args.execution_mode,
                 browser_provider=args.browser_provider,
                 resume_source=args.resume_source,
+                mode_discover=args.mode_discover,
                 tier=tier,
                 force=args.force,
                 reset_profile=args.reset_profile,
@@ -516,6 +607,8 @@ def main(argv: list[str] | None = None) -> int:
                 cfg = workspace.load_config(ws)
                 ob = workspace.inspect_onboarding_status(ws, cfg)
                 tier, _creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
+                v_stat = voice.inspect_voice_status(ws)
+                v_text = voice.read_voice_profile(ws) or ""
                 show_payload: dict[str, Any] = {
                     "ok": True,
                     "version": __version__,
@@ -535,6 +628,10 @@ def main(argv: list[str] | None = None) -> int:
                     "next_action_hint": ob["next_action_hint"],
                     "config_file": str(workspace.config_path(ws)),
                     "profile_facts_file": str(workspace.profile_facts_path(ws)),
+                    "voice_profile_ready": v_stat["ready"],
+                    "voice_profile_file": v_stat["path"],
+                    "voice_status": v_stat,
+                    "voice_profile_text": v_text[:2500] if v_text else "",
                     "config": cfg,
                     "strategy_confirmation": workspace.build_strategy_confirmation_summary(cfg, tier=tier),
                 }
@@ -573,6 +670,8 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["salary_panel_tolerance"] = args.salary_panel_tolerance == "true"
                 if args.salary_match_mode:
                     cli_patch["salary_match_mode"] = args.salary_match_mode
+                if args.employers is not None:
+                    cli_patch["past_employers"] = _split_csv(args.employers)
                 if args.blocked_companies is not None:
                     cli_patch["blocked_companies"] = _split_csv(args.blocked_companies)
                 if args.exclude_keywords is not None:
@@ -599,6 +698,10 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["auto_risk_acknowledged"] = True
                 workspace.apply_config_updates(cfg, cli_patch)
 
+                explicit_wants_favorite = (
+                    args.mode_discover == "favorite"
+                    or patch.get("mode_discover") == "favorite"
+                )
                 explicit_wants_auto = (
                     args.mode_discover == "auto"
                     or args.mode_reply == "auto"
@@ -607,6 +710,19 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 wants_auto = cfg.get("mode_discover") == "auto" or cfg.get("mode_reply") == "auto"
                 auto_downgrade_note = ""
+                if cfg.get("execution_mode") == "copilot" and cfg.get("mode_discover") == "favorite":
+                    if explicit_wants_favorite:
+                        _emit(
+                            {
+                                "ok": False,
+                                "code": "FAVORITE_REQUIRES_BROWSER_MODE",
+                                "error": "当前为副驾驶粘贴模式（copilot），无浏览器操控权限无法在招聘网页自动点击「感兴趣」收藏；请先切换 `--execution-mode browser` 或保持半自动（semi）。",
+                            }
+                        )
+                        return 1
+                    cfg["mode_discover"] = "semi"
+                    auto_downgrade_note = "已切为副驾驶粘贴模式（copilot），无网页点击权限，找岗动作模式已自动同步回半自动（semi）。"
+
                 if wants_auto:
                     if cfg.get("execution_mode") == "copilot":
                         if explicit_wants_auto:
@@ -629,13 +745,14 @@ def main(argv: list[str] | None = None) -> int:
                                     {
                                         "ok": False,
                                         "code": "PRO_REQUIRED_FOR_AUTO",
-                                        "error": "全自动档位（auto）属于 Pro 专业版权益；当前免费基础版支持半自动审阅（semi），可运行 `hiremate.py auth upgrade` 解锁 Pro。",
+                                        "error": "全自动档位（auto）属于 Pro 专业版权益；当前免费基础版支持半自动审阅（semi）或仅自动收藏（favorite），可运行 `hiremate.py auth upgrade` 解锁 Pro。",
                                     }
                                 )
                                 return 1
-                            cfg["mode_discover"] = "semi"
+                            if cfg.get("mode_discover") == "auto":
+                                cfg["mode_discover"] = "semi"
                             cfg["mode_reply"] = "semi"
-                            auto_downgrade_note = "当前未处于激活的 Pro 状态，档位已自动回退为半自动（semi）。"
+                            auto_downgrade_note = "当前未处于激活的 Pro 状态，全自动档位已自动回退为半自动（semi）。"
                         else:
                             explicit_ack = bool(args.ack_auto_risk or patch.get("auto_risk_acknowledged") is True)
                             if explicit_ack:
@@ -718,6 +835,7 @@ def main(argv: list[str] | None = None) -> int:
                     blocked_companies=cfg.get("blocked_companies"),
                     past_employers=cfg.get("past_employers"),
                     chat_already_open=bool(args.chat_already_open),
+                    already_favorited=bool(args.already_favorited),
                     filter_outsourcing=(cfg.get("outsourcing_policy", "block_all") != "allow_all"),
                     filter_onsite=(cfg.get("onsite_policy", "block_all") != "allow_all"),
                 )
@@ -742,8 +860,69 @@ def main(argv: list[str] | None = None) -> int:
                     resume_used=args.resume_used,
                     notify_desktop=not bool(args.no_notify),
                 )
+                has_round_info = any(
+                    (v or "").strip()
+                    for v in (
+                        args.interview_round,
+                        args.interview_time,
+                        args.interview_mode,
+                        args.interviewer,
+                        args.interview_summary,
+                    )
+                )
+                if has_round_info:
+                    iv_res = led.add_interview_round(
+                        job_id=str(tr_out["job"]["job_id"]),
+                        round_label=(args.interview_round or "一面"),
+                        scheduled_at=(args.interview_time or ""),
+                        mode=(args.interview_mode or ""),
+                        interviewer=(args.interviewer or ""),
+                        outcome=args.interview_outcome,
+                        summary=(args.interview_summary or ""),
+                        auto_advance_status=False,
+                    )
+                    tr_out["interview_round"] = iv_res["interview_round"]
                 _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
                 _emit(tr_out)
+                return 0
+            if args.led_cmd == "interview-add":
+                if not (args.job_id or "").strip() and not (args.company or "").strip():
+                    raise ValueError("ledger interview-add 必须传入 --job-id，或传入 --company（及可选 --title）自动定位/建档")
+                iv_out = led.add_interview_round(
+                    job_id=args.job_id,
+                    company=args.company,
+                    title=args.title,
+                    round_label=args.round_label,
+                    scheduled_at=args.scheduled_at,
+                    mode=args.mode,
+                    interviewer=args.interviewer,
+                    outcome=args.outcome,
+                    summary=args.summary,
+                    auto_advance_status=not bool(args.no_auto_advance),
+                )
+                _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
+                _emit(iv_out)
+                return 0
+            if args.led_cmd == "interview-update":
+                iv_upd = led.update_interview_round(
+                    args.round_id,
+                    round_label=args.round_label,
+                    scheduled_at=args.scheduled_at,
+                    mode=args.mode,
+                    interviewer=args.interviewer,
+                    outcome=args.outcome,
+                    summary=args.summary,
+                )
+                _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
+                _emit(iv_upd)
+                return 0
+            if args.led_cmd == "interview-list":
+                rounds = led.list_interview_rounds(
+                    job_id=args.job_id,
+                    outcome=args.outcome,
+                    limit=args.limit,
+                )
+                _emit({"ok": True, "count": len(rounds), "items": rounds})
                 return 0
             if args.led_cmd == "list":
                 items = led.list_jobs(status=args.status, search=args.search, limit=args.limit)
@@ -945,6 +1124,69 @@ def main(argv: list[str] | None = None) -> int:
             )
             _emit(upd_res)
             return 0 if upd_res.get("ok") else 1
+
+        if args.cmd == "voice":
+            if args.voice_cmd == "show":
+                raw_vp = voice.read_voice_profile(ws)
+                v_stat = voice.inspect_voice_status(ws)
+                _emit(
+                    {
+                        "ok": True,
+                        "action": "show",
+                        "ready": bool(raw_vp),
+                        "voice_profile_file": v_stat["path"],
+                        "voice_status": v_stat,
+                        "text": raw_vp if raw_vp else voice.NO_VOICE_PROFILE_HINT,
+                    }
+                )
+                return 0
+            if args.voice_cmd == "collect":
+                host_list = _split_csv(args.hosts) if args.hosts and args.hosts.strip().lower() != "auto" else ["auto"]
+                col_res = voice.collect_voice_corpus(
+                    ws,
+                    hosts=host_list,
+                    days=args.days,
+                    max_chars=args.max_chars,
+                )
+                _emit(col_res)
+                return 0
+            if args.voice_cmd == "save":
+                content = ""
+                if args.from_file:
+                    content = Path(args.from_file).expanduser().read_text(encoding="utf-8")
+                elif args.text:
+                    content = args.text
+                else:
+                    raise ValueError("voice save 必须传入 --text 或 --from-file")
+                sv_res = voice.save_voice_profile(ws, content)
+                refreshed_dash = _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
+                if refreshed_dash:
+                    sv_res["dashboard_refreshed"] = True
+                    sv_res["dashboard_path"] = refreshed_dash
+                _emit(sv_res)
+                return 0
+            if args.voice_cmd == "note":
+                n_txt = (args.note_flag_text or args.note_text or "").strip()
+                if not n_txt:
+                    raise ValueError("voice note 必须传入具体的措辞修改说明")
+                nt_res = voice.add_voice_note(ws, n_txt)
+                refreshed_dash = _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
+                if refreshed_dash:
+                    nt_res["dashboard_refreshed"] = True
+                    nt_res["dashboard_path"] = refreshed_dash
+                _emit(nt_res)
+                return 0
+            if args.voice_cmd == "clear":
+                cl_res = voice.clear_voice_data(ws, corpus_only=bool(args.corpus_only))
+                refreshed_dash = _sync_local_dashboard_best_effort(ws, home, only_if_exists=True)
+                if refreshed_dash:
+                    cl_res["dashboard_refreshed"] = True
+                    cl_res["dashboard_path"] = refreshed_dash
+                _emit(cl_res)
+                return 0
+
+        if args.cmd == "mcp-serve":
+            return mcp_server.serve_stdio(home_dir=home, workspace_dir=ws)
 
     except workspace.ConfigCorruptError as exc:
         _emit(

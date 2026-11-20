@@ -1,3 +1,4 @@
-# 求职助手（hiremate）DSH 插件加载配置
-- id: hiremate-dsh
-  name: ./index.mjs
+# DeepSeek Harness (Cordis) 运行时插件补丁（由 install_plugin.py 自动注册）
+- insert:
+    - id: hiremate-dsh
+      name: "hiremate-dsh"

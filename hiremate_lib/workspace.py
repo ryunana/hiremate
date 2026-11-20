@@ -26,7 +26,9 @@ from .normalize import (
 )
 
 DEFAULT_API_BASE = "https://hiremate.chengway.wang"
-VALID_MODES = ("semi", "auto")
+VALID_DISCOVER_MODES = ("semi", "favorite", "auto")
+VALID_REPLY_MODES = ("semi", "auto")
+VALID_MODES = VALID_REPLY_MODES
 VALID_EXECUTION_MODES = ("browser", "copilot")
 VALID_BROWSER_PROVIDERS = ("auto", "ego_lite", "builtin_browser_use")
 VALID_RESUME_SOURCES = ("pending", "attachment_pdf", "online_only", "both", "none")
@@ -197,6 +199,16 @@ def salary_mode_short_cn(cfg: dict[str, Any]) -> str:
     return "看上限·容忍面板标薪略低"
 
 
+def discover_mode_short_cn(mode: str | None) -> str:
+    """返回主动找岗动作模式的中文短标签。"""
+    m = str(mode or "semi").strip()
+    if m == "auto":
+        return "全自动破冰"
+    if m == "favorite":
+        return "仅自动收藏·不主动投递"
+    return "半自动审阅确认"
+
+
 def apply_config_updates(cfg: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     """增量合并配置字典，确保布尔过滤开关与三态渠道/薪资策略保持双向同步。"""
     for key, val in patch.items():
@@ -281,10 +293,10 @@ def validate_and_normalize_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
         else:
             cfg[key] = val
 
-    if cfg["mode_discover"] not in VALID_MODES:
-        raise ValueError(f"mode_discover 仅支持 {VALID_MODES}，收到: {cfg['mode_discover']!r}")
-    if cfg["mode_reply"] not in VALID_MODES:
-        raise ValueError(f"mode_reply 仅支持 {VALID_MODES}，收到: {cfg['mode_reply']!r}")
+    if cfg["mode_discover"] not in VALID_DISCOVER_MODES:
+        raise ValueError(f"mode_discover 仅支持 {VALID_DISCOVER_MODES}，收到: {cfg['mode_discover']!r}")
+    if cfg["mode_reply"] not in VALID_REPLY_MODES:
+        raise ValueError(f"mode_reply 仅支持 {VALID_REPLY_MODES}，收到: {cfg['mode_reply']!r}")
     if cfg["execution_mode"] not in VALID_EXECUTION_MODES:
         raise ValueError(f"execution_mode 仅支持 {VALID_EXECUTION_MODES}，收到: {cfg['execution_mode']!r}")
     if cfg["browser_provider"] not in VALID_BROWSER_PROVIDERS:
@@ -409,7 +421,12 @@ def atomic_write_text(path: Path, content: str, *, mode: int | None = None) -> N
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
     try:
-        with open(tmp_path, "w", encoding="utf-8") as fh:
+        if mode is not None:
+            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+            fh_ctx = os.fdopen(fd, "w", encoding="utf-8")
+        else:
+            fh_ctx = open(tmp_path, "w", encoding="utf-8")
+        with fh_ctx as fh:
             fh.write(content)
             fh.flush()
             try:
@@ -540,6 +557,11 @@ def inspect_onboarding_status(
                 "求职档案已就绪（当前为副驾驶粘贴模式）：请先顺手运行 `hiremate.py build-dashboard` 生成初始看板，"
                 "并在回复末尾主动给出 `1 / 2 / 3` 下一步菜单（① 粘贴一条 BOSS 岗位 JD 试跑排雷与破冰草稿；② 粘贴 HR 消息拟回复；③ 开启浏览器直连自动搜岗），切勿建完档直接停步冷场。"
             )
+        elif str(effective_cfg.get("mode_discover") or "semi") == "favorite":
+            next_action_hint = (
+                "求职档案已就绪（当前为浏览器直连 · 仅自动收藏模式）：请先顺手运行 `hiremate.py build-dashboard` 生成初始看板，"
+                "并在回复末尾主动给出 `1 / 2 / 3` 下一步菜单（①【推荐】立即去 BOSS 直聘跑首轮搜岗深筛并自动收藏合适职位（仅点「感兴趣」，绝不主动发消息）；② 粘贴单条岗位 JD/HR 消息参谋；③ 打开看板或微调偏好），切勿建完档直接停步冷场。"
+            )
         else:
             next_action_hint = (
                 "求职档案已就绪（当前为浏览器直连模式）：请先顺手运行 `hiremate.py build-dashboard` 生成初始看板，"
@@ -559,6 +581,117 @@ def inspect_onboarding_status(
         "missing_steps": missing_steps,
         "recommendations": recommendations,
         "next_action_hint": next_action_hint,
+    }
+
+
+def detect_runtime_agent_host(
+    *,
+    argv0: str | None = None,
+    environ: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """探测当前正在调用 CLI 的桌面 Agent 宿主，并判断该宿主是否支持原生侧边栏求职看板。"""
+    import sys
+
+    env = environ if environ is not None else dict(os.environ)
+    explicit = str(env.get("HIREMATE_HOST") or "").strip().lower()
+    raw_script = str(argv0 if argv0 is not None else (sys.argv[0] if sys.argv else "")).replace("\\", "/")
+
+    host = "unknown"
+    if explicit in {"dsh", "deepseek", "deepseek-harness"}:
+        host = "dsh"
+    elif explicit in {"codex", "openai-codex"}:
+        host = "codex"
+    elif explicit in {"antigravity", "agy"}:
+        host = "antigravity"
+    elif explicit in {"workbuddy", "claude", "cursor", "windsurf", "xiaohongshu", "none"}:
+        host = explicit
+    elif "/.workbuddy/" in raw_script:
+        host = "workbuddy"
+    elif "/.claude/" in raw_script:
+        host = "claude"
+    elif "/.cursor/" in raw_script:
+        host = "cursor"
+    elif "/.codeium/windsurf/" in raw_script:
+        host = "windsurf"
+    elif "/.dsh/" in raw_script or "/dsh-plugin/" in raw_script:
+        host = "dsh"
+    elif "/.codex/" in raw_script or "/codex-marketplace/" in raw_script:
+        host = "codex"
+    elif "/.gemini/" in raw_script:
+        host = "antigravity"
+    elif env.get("ANTIGRAVITY_AGENT") or env.get("ANTIGRAVITY_CONVERSATION_ID") or env.get("ANTIGRAVITY_APP_DATA_DIR"):
+        host = "antigravity"
+    elif any(k.startswith("WORKBUDDY_") for k in env):
+        host = "workbuddy"
+    elif env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT") or env.get("CLAUDE_PROJECT_DIR"):
+        host = "claude"
+    elif env.get("CURSOR_TRACE_ID") or env.get("CURSOR_SESSION_ID"):
+        host = "cursor"
+    elif env.get("CODEX_THREAD_ID") or env.get("CODEX_SANDBOX") or env.get("CODEX_CI"):
+        host = "codex"
+    elif (
+        env.get("DSH_SESSION_ID")
+        or env.get("DSH_PTY_SESSION_ID")
+        or env.get("DSH_APP_VERSION")
+        or env.get("DSH_DESKTOP_DSH_DIR")
+        or env.get("DSH_HOME")
+    ):
+        host = "dsh"
+
+    if host == "dsh":
+        return {
+            "host": "dsh",
+            "host_display": "DeepSeek Harness",
+            "sidebar_supported": True,
+            "sidebar_entry": "左侧边栏「求职助手」图标",
+            "sidebar_checklist_line": (
+                "📌 **侧边栏看板入口**：当前客户端支持侧边栏面板——随时可在**左侧边栏点开「求职助手」**查看实时漏斗、一键学习对话语气或在线调整筛选策略"
+                "（若刚安装完暂未看到图标，下次重启客户端后即自动显示，当前无需停下重启）。"
+            ),
+            "sidebar_spotlight_bullet": (
+                "在 **DeepSeek Harness 左侧边栏点击「求职助手」图标**即可直接在客户端内打开实时看板、一键从历史对话学习语气或在线修改筛选策略"
+                "（刚安装首次未见图标时重启一次客户端即显示；也可随时输 `/hiremate-dashboard`）"
+            ),
+            "agent_instruction": "当前宿主（DeepSeek Harness）支持侧边栏看板，请主动提示用户可在左侧边栏找到「求职助手」面板（首次安装重启客户端后可见）。",
+        }
+    if host == "codex":
+        return {
+            "host": "codex",
+            "host_display": "OpenAI Codex",
+            "sidebar_supported": True,
+            "sidebar_entry": "左侧边栏「求职助手（HireMate）」应用面板",
+            "sidebar_checklist_line": (
+                "📌 **侧边栏看板入口**：当前 Codex 支持侧边栏应用面板——随时可在**左侧边栏点开「求职助手（HireMate）」**查看实时漏斗与在线修改筛选策略"
+                "（若刚安装完暂未看到入口，重载或重启一次客户端后即显示，当前无需停下重启）。"
+            ),
+            "sidebar_spotlight_bullet": (
+                "在 **Codex 左侧边栏点开「求职助手（HireMate）」应用面板**即可直接在客户端内查看实时投递漏斗、提炼个人语气或在线调整筛选策略"
+                "（首次安装后重载/重启一次客户端即显示）"
+            ),
+            "agent_instruction": "当前宿主（Codex）支持侧边栏看板，请主动提示用户可在左侧边栏找到「求职助手（HireMate）」面板（首次安装重载/重启后可见）。",
+        }
+    if host == "antigravity":
+        return {
+            "host": "antigravity",
+            "host_display": "Antigravity",
+            "sidebar_supported": True,
+            "sidebar_entry": "侧边栏 / 右侧辅助面板「求职助手看板」",
+            "sidebar_checklist_line": (
+                "📌 **侧边栏看板入口**：当前 Antigravity 支持侧边栏看板——随时可在**侧边栏或右侧辅助面板打开「求职助手看板」**查看实时转化漏斗。"
+            ),
+            "sidebar_spotlight_bullet": (
+                "在 **Antigravity 侧边栏或右侧辅助面板点开「求职助手看板」**即可直接在工作区内查看实时转化漏斗与待办队列"
+            ),
+            "agent_instruction": "当前宿主（Antigravity）支持侧边栏看板，请主动提示用户可在侧边栏或辅助面板中找到「求职助手看板」。",
+        }
+    return {
+        "host": host,
+        "host_display": host,
+        "sidebar_supported": False,
+        "sidebar_entry": "",
+        "sidebar_checklist_line": "",
+        "sidebar_spotlight_bullet": "",
+        "agent_instruction": "当前宿主不支持第三方侧边栏看板面板，请仅引导用户通过浏览器打开本地 dashboard.html 查看看板，切勿提示去侧边栏查找。",
     }
 
 
@@ -726,9 +859,10 @@ def build_startup_checklist(
             f"底薪：{effective_cfg.get('min_salary_k', 20)}K+（{salary_mode_short_cn(effective_cfg)}） ｜ "
             f"外包：{pol_cn.get(out_pol, out_pol)} ｜ 驻场：{pol_cn.get(onsite_pol, onsite_pol)} ｜ "
             f"猎头：{pol_cn.get(str(effective_cfg.get('headhunter_policy', 'inbound_only')), '仅接来信')} ｜ "
+            f"找岗：{discover_mode_short_cn(effective_cfg.get('mode_discover'))} ｜ "
             f"已拉黑前东家：{len(emps)} 家"
         )
-        pref_action = f"当前版本：{tier_cn}；上述每一项筛选策略均可随时一句话或通过选项卡片修改。"
+        pref_action = f"当前版本：{tier_cn}；上述每一项筛选策略与找岗动作模式均可随时一句话或通过选项卡片修改。"
     else:
         pref_status = "pending"
         pref_icon = "⬜"
@@ -738,7 +872,7 @@ def build_startup_checklist(
         pref_action = (
             f"当前版本：{tier_cn}；读取简历后请优先调用宿主选项控件（如 `ask_user_question` / `request_user_input` / `AskUserQuestion` / `ask_question`）"
             f"按 `interactive_questions` 带 `(Recommended)` 推荐项让用户逐项点选确认：目标岗位与前东家屏蔽、城市+异地大厂弹性、"
-            f"最低月薪+薪资区间口径（看上限宽松 / 看上限严格 / 看下限严格卡起薪）、外包策略、驻场策略、猎头策略与被动给简历尺度。"
+            f"最低月薪+薪资区间口径（看上限宽松 / 看上限严格 / 看下限严格卡起薪）、外包策略、驻场策略、猎头策略、被动给简历尺度及找岗动作模式（半自动审阅单 / 仅自动收藏不投递）。"
         )
 
     items = [
@@ -786,21 +920,30 @@ def build_startup_checklist(
         tier=tier,
         browser_choice_needed=(b_status == "choice_required"),
         has_ego=has_ego,
+        copilot_fallback=(b_status == "copilot_fallback"),
     )
 
+    host_guide = detect_runtime_agent_host()
     md_lines = [
         "### 📋 求职助手 · 启动准备核对单（Checklist）",
-        f"1. {b_icon} **浏览器操控权限**：{b_summary}",
-        f"   - {b_action}",
-        f"2. {p_icon} **招聘网页登录态**：{p_summary}",
-        f"   - {p_action}",
-        f"3. {r_icon} **真实简历底座（必选）**：{r_summary}",
-        f"   - {r_action}",
-        f"4. {pref_icon} **职位筛选策略与版本（须与你确认是否修改）**：{pref_summary}",
-        f"   - {pref_action}",
-        "",
-        strat_summary["markdown"],
     ]
+    if host_guide["sidebar_supported"] and host_guide["sidebar_checklist_line"]:
+        md_lines.append(f"> {host_guide['sidebar_checklist_line']}")
+        md_lines.append("")
+    md_lines.extend(
+        [
+            f"1. {b_icon} **浏览器操控权限**：{b_summary}",
+            f"   - {b_action}",
+            f"2. {p_icon} **招聘网页登录态**：{p_summary}",
+            f"   - {p_action}",
+            f"3. {r_icon} **真实简历底座（必选）**：{r_summary}",
+            f"   - {r_action}",
+            f"4. {pref_icon} **职位筛选策略与版本（须与你确认是否修改）**：{pref_summary}",
+            f"   - {pref_action}",
+            "",
+            strat_summary["markdown"],
+        ]
+    )
 
     res_chk: dict[str, Any] = {
         "ok": True,
@@ -814,6 +957,7 @@ def build_startup_checklist(
         "builtin_headed_persistent": builtin_headed_persistent,
         "resume_source": resume_src,
         "has_attachment_resume": ob["has_attachment_resume"],
+        "host_sidebar_guide": host_guide,
         "items": items,
         "strategy_confirmation": strat_summary,
         "interactive_questions": interactive_qs,
@@ -834,6 +978,7 @@ def build_onboarding_interactive_questions(
     tier: str = "free",
     browser_choice_needed: bool = False,
     has_ego: bool = False,
+    copilot_fallback: bool = False,
 ) -> dict[str, Any]:
     """构建面向各宿主原生选项控件（ask_user_question / request_user_input / AskUserQuestion / ask_question）
     的分步交互式策略选择蓝图，每题首项均标注 `(Recommended)` 推荐值并支持自定义输入微调。
@@ -1044,17 +1189,25 @@ def build_onboarding_interactive_questions(
     ]
     all_questions = list(batch_1) + list(batch_2)
 
-    if tier == "pro":
+    is_copilot = copilot_fallback or str(cfg.get("execution_mode") or "browser") == "copilot"
+    if not is_copilot and tier == "pro":
+        mode_d_cur = str(cfg.get("mode_discover") or "semi")
+        mode_r_cur = str(cfg.get("mode_reply") or "semi")
+        if mode_d_cur == "auto" and mode_r_cur == "auto":
+            pro_cur_val = "full_auto"
+        elif mode_d_cur == "favorite" and mode_r_cur == "auto":
+            pro_cur_val = "favorite_reply_auto"
+        elif mode_r_cur == "auto":
+            pro_cur_val = "reply_auto"
+        else:
+            pro_cur_val = "all_semi"
+
         pro_mode_q = {
             "id": "pro_automation_mode",
             "header": "自动化档位",
-            "question": "Pro 全自动权限已解锁，日常找岗破冰与消息答疑希望采用哪种托管档位？（开启全自动内置每轮≤5岗、每日≤20岗及约面/谈薪停手保护）",
+            "question": "Pro 全自动权限已解锁，日常找岗与消息答疑希望采用哪种托管档位？（开启全自动内置每轮≤5岗、每日≤20岗及约面/谈薪停手保护）",
             "cli_flags": ["--mode-discover", "--mode-reply", "--ack-auto-risk"],
-            "current_value": (
-                "full_auto"
-                if cfg.get("mode_discover") == "auto" and cfg.get("mode_reply") == "auto"
-                else ("reply_auto" if cfg.get("mode_reply") == "auto" else "all_semi")
-            ),
+            "current_value": pro_cur_val,
             "options": [
                 {
                     "label": "省心全托管 · 找岗+答疑全自动 (Recommended)",
@@ -1062,14 +1215,19 @@ def build_onboarding_interactive_questions(
                     "description": "定额自动破冰 + 自动答复常规问题递简历，遇约面/谈薪/加微信立即停手弹窗通知（选此项即确认已知悉平台自动化风控护栏）",
                 },
                 {
+                    "label": "仅自动收藏 · 不主动投 + 答疑全自动",
+                    "value": "favorite_reply_auto",
+                    "description": "筛出好岗只点 BOSS「感兴趣」收藏攒入看板（由你看完自己投），被动来信与已聊会话自动回复跟进",
+                },
+                {
                     "label": "稳妥半托管 · 找岗审阅 + 答疑全自动",
                     "value": "reply_auto",
                     "description": "主动打招呼前先出审阅单由你挑，已聊上的会话自动回复跟进",
                 },
                 {
-                    "label": "全程半自动确认",
+                    "label": "全程手动确认（或纯收藏不代回）",
                     "value": "all_semi",
-                    "description": "主动打招呼与每条消息回复均先生成草稿由你确认后再发",
+                    "description": "打招呼与每条消息回复均先生成草稿确认后再发（若需仅收藏且不自动回消息，可在自定义框注明“仅自动收藏”）",
                 },
             ],
         }
@@ -1081,6 +1239,34 @@ def build_onboarding_interactive_questions(
             }
         )
         all_questions.append(pro_mode_q)
+    elif not is_copilot:
+        free_mode_q = {
+            "id": "discover_action_mode",
+            "header": "找岗动作模式",
+            "question": "筛出符合条件且排雷通过的职位后，你希望助手默认怎么处理？",
+            "cli_flags": ["--mode-discover"],
+            "current_value": "favorite" if str(cfg.get("mode_discover") or "semi") == "favorite" else "semi",
+            "options": [
+                {
+                    "label": "半自动审阅单 · 先看草稿再发 (Recommended)",
+                    "value": "semi",
+                    "description": "在对话与看板列出候选及拟好的破冰短句，网页端不点任何按钮，等你回复序号才点沟通",
+                },
+                {
+                    "label": "仅自动收藏 · 不主动投递",
+                    "value": "favorite",
+                    "description": "自动在 BOSS 点击「感兴趣」收藏并同步至本地看板（绝不点击立即沟通），方便你自己看完觉得合适再投递",
+                },
+            ],
+        }
+        batches.append(
+            {
+                "batch_index": 3,
+                "title": "第 3 组：好岗处理动作模式（1 项）",
+                "questions": [free_mode_q],
+            }
+        )
+        all_questions.append(free_mode_q)
 
     return {
         "preferred_tools": {
@@ -1188,16 +1374,20 @@ def build_strategy_confirmation_summary(
         },
         {
             "key": "resume_and_automation",
-            "label": "被动求简历策略 & 自动化档位",
+            "label": "被动求简历策略 & 找岗/答疑档位",
             "current": (
                 f"被动求简历：{'除非明显不符尽量给 [默认]' if inb_pol == 'generous' else '仅高匹配严格给付'}"
                 + (
-                    f" ｜ 档位：找岗[{'全自动' if mode_d == 'auto' else '半自动'}] · 答疑[{'全自动' if mode_r == 'auto' else '半自动'}]"
+                    f" ｜ 档位：找岗[{'全自动' if mode_d == 'auto' else ('仅自动收藏' if mode_d == 'favorite' else '半自动')}] · 答疑[{'全自动' if mode_r == 'auto' else '半自动'}]"
                     if tier == "pro"
-                    else " ｜ 档位：免费版默认半自动审阅（Pro 解锁全自动找岗与消息答疑）"
+                    else (
+                        " ｜ 找岗模式：仅自动收藏·不主动投递 [已开启]（Pro 解锁全自动破冰/定时静默收藏与消息答疑）"
+                        if mode_d == "favorite"
+                        else " ｜ 找岗模式：半自动审阅单 [默认]（可切「仅自动收藏·不主动投递」；Pro 解锁全自动与定时巡检）"
+                    )
                 )
             ),
-            "how_to_change": "被动求简历可改严控（`--inbound-resume-policy strict`）"
+            "how_to_change": "找岗支持「半自动审阅 / 仅自动收藏」（`--mode-discover semi|favorite`）；被动求简历可改严控（`--inbound-resume-policy strict`）"
             + ("；Pro 找岗/答疑可随时切全自动（`--mode-discover auto --mode-reply auto`）" if tier == "pro" else ""),
         },
     ]
@@ -1237,25 +1427,48 @@ def build_dashboard_spotlight(
         except ValueError:
             file_url = resolved_str
 
+    host_guide = detect_runtime_agent_host()
     tier_tag = "Pro 全托管视图" if tier == "pro" else "纯本地隐私台账"
     count_tag = f" · 当前共 {jobs_count} 条记录" if jobs_count is not None else ""
     opened_tag = "（已在默认浏览器为你自动打开）" if browser_opened else ""
-    link_part = (
-        f"[点击在浏览器打开求职看板]({file_url})（本地文件：`{resolved_str}`；DeepSeek Harness 随时输入 `/hiremate-dashboard` 一键弹开）"
-        if file_url
-        else "对助手说「打开求职看板」（DeepSeek Harness 输入 `/hiremate-dashboard`）即可一键弹开"
-    )
+    if host_guide["host"] == "dsh":
+        link_part = (
+            f"[点击在浏览器打开求职看板]({file_url})（本地文件：`{resolved_str}`；也可直接点左侧栏「求职助手」或随时输入 `/hiremate-dashboard` 一键弹开）"
+            if file_url
+            else "直接点左侧栏「求职助手」或输入 `/hiremate-dashboard` 即可一键弹开"
+        )
+    elif host_guide["sidebar_supported"]:
+        link_part = (
+            f"[点击在浏览器打开求职看板]({file_url})（本地文件：`{resolved_str}`；也可直接在{host_guide['sidebar_entry']}打开）"
+            if file_url
+            else f"直接在{host_guide['sidebar_entry']}或对助手说「打开求职看板」即可打开"
+        )
+    else:
+        link_part = (
+            f"[点击在浏览器打开求职看板]({file_url})（本地文件：`{resolved_str}`；随时对助手说「打开求职看板」即可弹开）"
+            if file_url
+            else "对助手说「打开求职看板」即可在浏览器一键弹开"
+        )
 
     lines = [
         f"### 📊 你的专属「本地可视化求职看板」已就绪{opened_tag}！（{tier_tag}{count_tag}）",
         f"- 👉 **立即打开看板**：{link_part}",
-        "- **一眼看清全局进展**：内置 **6 维实时投递转化漏斗**（已评估 → 外包/前东家排雷跳过 → 破冰送达 → 双方建联 → PDF 简历送达 → 待本人约面决策）",
-        "- **三大交互视图**：① **待办置顶队列**（约面/谈薪/加微信红线会话高亮置顶 + 待确认候选） ｜ ② **全量岗位台账**（支持搜公司/筛状态，每家被拦外包均有留痕） ｜ ③ **策略与简历路由总览**（8 项规则与多版简历绑定一目了然）",
     ]
+    if host_guide["sidebar_supported"] and host_guide["sidebar_spotlight_bullet"]:
+        lines.append(f"- 📌 **侧边栏随时直达**：{host_guide['sidebar_spotlight_bullet']}")
+    lines.extend(
+        [
+            "- **一眼看清全局进展**：内置 **7 格实时投递转化漏斗**（已评估 → 外包/前东家排雷跳过 → 破冰送达 → 双方建联 → PDF 简历送达 → 待本人约面决策 → 面试与 Offer）",
+            "- **四大交互视图**：① **待办置顶队列**（约面/谈薪/加微信红线会话高亮置顶 + 已收藏待投递 / 待确认候选） ｜ ② **面试与 Offer 追踪**（多轮日程与面经复盘） ｜ ③ **全量岗位台账**（支持搜公司/筛状态，每家被拦外包均有留痕） ｜ ④ **策略与档案总览**（8 项规则、多版简历与个人语气档案一目了然）",
+        ]
+    )
     return {
         "dashboard_path": resolved_str,
         "file_url": file_url,
         "browser_opened": browser_opened,
+        "detected_host": host_guide["host"],
+        "host_sidebar_supported": host_guide["sidebar_supported"],
+        "sidebar_entry": host_guide["sidebar_entry"],
         "markdown": "\n".join(lines),
     }
 
@@ -1286,33 +1499,42 @@ def build_pro_activation_guide(
         "工作日白天工作时间自动匹配投递与答疑 + 约面/谈薪/索要微信自动停手并弹本机系统通知（限本人最多 2 台电脑长期有效）",
     ]
 
-    mode_d_cn = "全自动托管（auto）" if mode_d == "auto" else "半自动审阅（semi）"
+    mode_d_cn = (
+        "全自动托管（auto）"
+        if mode_d == "auto"
+        else ("仅自动收藏（favorite）" if mode_d == "favorite" else "半自动审阅（semi）")
+    )
     mode_r_cn = "全自动跟进（auto）" if mode_r == "auto" else "半自动确认（semi）"
 
     if not ob["onboarding_completed"]:
         md_lines = [
             f"### 🎉 Pro 全托管版已成功绑定本机（{acct_tag}）！",
             "**你已解锁全部 5 项 Pro 专属高级权益**：",
-            "- ✅ **100+ 深度外包与社区动态排雷池** ｜ ✅ **找岗与消息答疑「全自动模式」** ｜ ✅ **真人短句答疑守卫** ｜ ✅ **多版 PDF 简历按岗自动路由** ｜ ✅ **工作时间自动匹配投递回复 + 约面桌面弹窗提醒**（支持 2 台电脑通用）",
+            "- ✅ **100+ 深度外包与社区动态排雷池** ｜ ✅ **找岗与消息答疑「全自动模式 / 定时静默收藏」** ｜ ✅ **真人短句答疑守卫** ｜ ✅ **多版 PDF 简历按岗自动路由** ｜ ✅ **工作时间自动匹配投递回复 + 约面桌面弹窗提醒**（支持 2 台电脑通用）",
             "",
             "📋 **下一步（5 分钟完成建档即可生成专属可视化求职看板并开启全自动托管）**：",
-            "- 请直接把你的 **PDF/Word 简历拖进对话**（或让我去读取你的 BOSS 在线简历），我们核对完 **8 项筛选策略** 后，就能自动为你弹开**本地可视化求职看板**、开启**全自动找岗/答疑模式**并挂上工作日自动巡检！",
+            "- 请直接把你的 **PDF/Word 简历拖进对话**（或让我去读取你的 BOSS 在线简历），我们核对完 **8 项筛选策略** 后，就能自动为你弹开**本地可视化求职看板**、开启**全自动找岗/静默收藏与答疑模式**并挂上工作日自动巡检！",
         ]
         must_do = [
             "1. 【严禁只说一句登录成功就停下】必须先向用户完整报喜展示上方 `unlocked_benefits` 5 项已解锁的 Pro 高级能力；",
             "2. 紧接着在同一条回复中展示《启动准备核对单》与 8 项默认筛选策略，引导用户提供简历完成建档，并告知建完档即可生成可视化求职看板与开启全自动巡检。",
         ]
     else:
-        semi_notice = (
-            f"💡 **模式提醒：你当前的「主动找岗（{mode_d_cn}）」与「消息答疑（{mode_r_cn}）」仍处于免费版默认的半自动状态**——现在 Pro 已解锁**全自动模式（`auto`）**，无需再每条手动确认！"
-            if still_semi
-            else f"✅ **当前自动化档位**：主动找岗「{mode_d_cn}」 ｜ 消息答疑「{mode_r_cn}」"
-        )
+        if mode_d == "semi" and mode_r == "semi":
+            semi_notice = (
+                f"💡 **模式提醒：你当前的「主动找岗（{mode_d_cn}）」与「消息答疑（{mode_r_cn}）」仍处于免费版默认的半自动状态**——现在 Pro 已解锁**全自动模式（`auto`）**（也支持「找岗仅自动收藏 + 消息全自动答疑」），无需再每条手动确认！"
+            )
+        elif mode_r == "semi":
+            semi_notice = (
+                f"💡 **模式提醒：你当前找岗为「{mode_d_cn}」，但「消息答疑（{mode_r_cn}）」仍处于半自动状态**——Pro 可一键开启「消息全自动答疑 + 工作日定时静默收藏/巡检」！"
+            )
+        else:
+            semi_notice = f"✅ **当前自动化档位**：主动找岗「{mode_d_cn}」 ｜ 消息答疑「{mode_r_cn}」"
         md_lines = [
             f"### 🎉 Pro 全托管版已激活生效（{acct_tag}）！",
             "**已为你本机解锁 5 项 Pro 高级功能**：",
             "1. **100+ 深度外包名录 + 社区动态排雷池**：穿透公司主页识破伪装外包、派遣与驻场岗",
-            "2. **全自动找岗 & 全自动答疑模式解锁**：支持定额自动破冰（每轮≤5岗）与自动回复跟进",
+            "2. **全自动找岗 / 定时静默收藏 & 全自动答疑解锁**：支持定额自动破冰、或只点「感兴趣」收藏攒好岗，配合自动回复跟进",
             "3. **真人感短句答疑守卫**：严格对照你的本地真实履历自然接话，绝不瞎编经历",
             "4. **多版线上 PDF 简历自动路由**：手里有多份方向简历时自动按岗匹配投递",
             "5. **工作时间自动匹配投递回复 + 约面弹窗停手**：聊到约面时间/要微信/谈薪资自动停手弹窗叫你（支持 2 台电脑同时使用）",
@@ -1323,13 +1545,13 @@ def build_pro_activation_guide(
             "",
             "**接下来想怎么开启 Pro 托管？（直接回数字即可）：**",
             "1. **【推荐 · 省心全托管】把「主动找岗 + 消息答疑」双双切换为全自动（`auto`），并挂载工作日自动巡检** *(周一至周五 09:00–12:00、14:00–18:00 自动盯盘，开启前向你确认一次防风控护栏)*",
-            "2. **【稳妥半托管】找岗保留「半自动审阅」，仅把「消息答疑」切为全自动（`auto`）+ 开启工作日自动巡检** *(打招呼由你挑，后续追问与递简历全自动)*",
-            "3. **【先跑一轮体验】暂保持半自动，立即用 Pro 100+ 深度排雷库去 BOSS 筛一轮岗位 + 检查未读消息**",
+            "2. **【只收藏不乱投 + 自动答疑】找岗设为「仅自动收藏（`favorite`）」+「消息答疑」切为全自动（`auto`）+ 开启工作日自动巡检** *(巡检自动筛出好岗点「感兴趣」攒进收藏夹由你挑着投，被动来信与已聊会话全自动跟进)*",
+            "3. **【稳妥半托管 / 先跑一轮】找岗保留「半自动审阅单」** *(回 `3A` 仅把消息答疑切全自动；回 `3B` 暂保持半自动先跑一轮 Pro 深度排雷筛岗 + 检查未读消息)*",
             "4. **【配置多版简历路由】** *(若有 2 份以上线上附件简历，告诉我文件名与对应方向即可绑定自动路由)*",
         ]
         must_do = [
-            "1. 【严禁绑定后冷场停步或漏讲求职看板】必须向用户完整展示已解锁的 5 项 Pro 权益与独立的「📊 本地可视化求职看板」入口区块，并明确指出当前「主动找岗」与「消息答疑」若仍处于半自动（semi），现已可切换为全自动（auto）；",
-            "2. 必须在回复末尾展示上方 `user_reply_menu_markdown` 的 1 / 2 / 3 / 4 选择菜单；若用户回复 1 或 2 要求切 `auto`，先做简短平台风控确认提示，用户点头后带 `--ack-auto-risk` 运行 `config set` 并挂载宿主工作日定时巡检。",
+            "1. 【严禁绑定后冷场停步或漏讲求职看板】必须向用户完整展示已解锁的 5 项 Pro 权益与独立的「📊 本地可视化求职看板」入口区块，并明确指出当前「主动找岗」与「消息答疑」若仍处于半自动（semi），现已可切换为全自动（auto）或「找岗仅自动收藏 + 答疑全自动」；",
+            "2. 必须在回复末尾展示上方 `user_reply_menu_markdown` 的 1 / 2 / 3 / 4 选择菜单；若用户选择含 `auto` 的档位，先做简短平台风控确认提示，用户点头后带 `--ack-auto-risk` 运行 `config set` 并挂载宿主工作日定时巡检。",
         ]
 
     return {
@@ -1397,38 +1619,60 @@ def build_post_onboarding_guide(
         ]
     elif tier == "pro":
         recommended_action = "run_pro_first_round_and_schedule_patrol"
+        is_fav = str(cfg.get("mode_discover") or "semi") == "favorite"
         prov_label = (
             "ego lite 省 Token 通道"
             if b_prov == "ego_lite"
             else ("宿主自带 Browser Use" if b_prov == "builtin_browser_use" else "已登录浏览器")
         )
+        pro_opt1_label = (
+            "【推荐】立即去 BOSS 跑首轮 Pro 深筛排雷并自动收藏好岗（不主动投递）+ 检查未读消息"
+            if is_fav
+            else "【推荐】立即去 BOSS 跑首轮 Pro 深度排雷筛岗 + 检查未读消息"
+        )
+        pro_opt1_detail = (
+            f"通过{prov_label}按「{roles} · {cities} · {min_k}K+」筛出高匹配自研岗，自动点击「感兴趣」存入收藏夹与本地看板（绝不点击立即沟通，避开 {shield_cnt} 家前东家与 100+ 伪装外包）"
+            if is_fav
+            else f"通过{prov_label}按「{roles} · {cities} · {min_k}K+」筛出高匹配自研岗（100+ 深度外包名录自动避坑、跳过 {shield_cnt} 家前东家）"
+        )
         options = [
             {
                 "key": "1",
-                "label": "【推荐】立即去 BOSS 跑首轮 Pro 深度排雷筛岗 + 检查未读消息",
-                "detail": f"通过{prov_label}按「{roles} · {cities} · {min_k}K+」筛出高匹配自研岗（100+ 深度外包名录自动避坑、跳过 {shield_cnt} 家前东家）",
+                "label": pro_opt1_label,
+                "detail": pro_opt1_detail,
             },
             {
                 "key": "2",
                 "label": "一键挂载工作日工作时间自动巡检定时任务",
-                "detail": "每周一至周五 09:00–12:00、14:00–18:00 每 10～15 分钟自动盯未读消息、递对应简历，遇到约面/谈薪立即弹窗叫你",
+                "detail": "每周一至周五 09:00–12:00、14:00–18:00 每 10～15 分钟自动盯未读消息、递对应简历"
+                + ("、到期自动静默收藏好岗" if is_fav else "")
+                + "，遇到约面/谈薪立即弹窗叫你",
             },
             {
                 "key": "3",
-                "label": "切换半自动 / 全自动档位或打开可视化求职看板",
-                "detail": f"当前可分别设定「主动找岗」与「消息答疑」为半自动确认（semi）或全自动托管（auto），并在浏览器查看 Pro 漏斗看板{dash_note}",
+                "label": "切换找岗/答疑档位（半自动 / 仅自动收藏 / 全自动）或打开可视化求职看板",
+                "detail": f"当前可分别设定「主动找岗」（semi/favorite/auto）与「消息答疑」（semi/auto），并在浏览器查看 Pro 漏斗看板{dash_note}",
             },
         ]
         menu_lines = [
             dash_spot["markdown"],
             "",
             "### 🚀 Pro 求职档案已就绪！回复数字直接开工：",
-            f"1. **【推荐】立即跑首轮 BOSS 深度搜岗 + 未读消息检查** — 按 `{roles}`（`{cities}` · `{min_k}K+`）穿透筛除 100+ 伪装外包并避开 {shield_cnt} 家前东家",
-            "2. **一键开启工作时间自动巡检** — 挂载周一至周五工作时间定时巡检，主动匹配投递、自动回复递简历，到约面弹窗喊你",
-            f"3. **调整半自动/全自动档位 或 在浏览器打开可视化求职看板**{dash_note}",
+            (
+                f"1. **【推荐】立即跑首轮 BOSS 深度搜岗并自动收藏 + 未读消息检查** — 按 `{roles}`（`{cities}` · `{min_k}K+`）穿透筛除 100+ 伪装外包并避开 {shield_cnt} 家前东家，**只点「感兴趣」收藏攒好岗、绝不主动打招呼**"
+                if is_fav
+                else f"1. **【推荐】立即跑首轮 BOSS 深度搜岗 + 未读消息检查** — 按 `{roles}`（`{cities}` · `{min_k}K+`）穿透筛除 100+ 伪装外包并避开 {shield_cnt} 家前东家"
+            ),
+            (
+                "2. **一键开启工作时间自动巡检** — 挂载周一至周五工作时间定时巡检，自动静默收藏合适新岗、自动回复递简历，到约面弹窗喊你"
+                if is_fav
+                else "2. **一键开启工作时间自动巡检** — 挂载周一至周五工作时间定时巡检，主动匹配投递、自动回复递简历，到约面弹窗喊你"
+            ),
+            f"3. **调整半自动 / 仅自动收藏 / 全自动档位 或 在浏览器打开可视化求职看板**{dash_note}",
         ]
     else:
-        recommended_action = "run_free_first_round_boss_preview"
+        is_fav = str(cfg.get("mode_discover") or "semi") == "favorite"
+        recommended_action = "run_free_first_round_boss_favorite" if is_fav else "run_free_first_round_boss_preview"
         prov_label = (
             "ego lite"
             if b_prov == "ego_lite"
@@ -1437,8 +1681,16 @@ def build_post_onboarding_guide(
         options = [
             {
                 "key": "1",
-                "label": "【推荐】立即去 BOSS 直聘跑第一轮搜岗深筛预览（先验水准，不乱点发送）",
-                "detail": f"使用{prov_label}按「{roles} · {cities} · {min_k}K+」筛出 3～5 个靠谱自研候选、自动绕开 {shield_cnt} 家前东家与外包，生成破冰话术审阅单给你过目，等你回序号才发送",
+                "label": (
+                    "【推荐】立即去 BOSS 直聘跑第一轮搜岗深筛并自动收藏（只收藏不主动投递）"
+                    if is_fav
+                    else "【推荐】立即去 BOSS 直聘跑第一轮搜岗深筛预览（先验水准，不乱点发送）"
+                ),
+                "detail": (
+                    f"使用{prov_label}按「{roles} · {cities} · {min_k}K+」筛出靠谱自研候选、自动绕开 {shield_cnt} 家前东家与外包，直接在 BOSS 点「感兴趣」收藏并同步本地看板，方便你自己看完再投递"
+                    if is_fav
+                    else f"使用{prov_label}按「{roles} · {cities} · {min_k}K+」筛出 3～5 个靠谱自研候选、自动绕开 {shield_cnt} 家前东家与外包，生成破冰话术审阅单给你过目，等你回序号才发送"
+                ),
             },
             {
                 "key": "2",
@@ -1448,14 +1700,18 @@ def build_post_onboarding_guide(
             {
                 "key": "3",
                 "label": "在浏览器打开可视化求职看板 / 微调筛选偏好",
-                "detail": f"打开本地静态漏斗看板查看实时队列与排雷台账{dash_note}，或随时一句话修改薪资、城市、外包/驻场开关",
+                "detail": f"打开本地静态漏斗看板查看实时队列与排雷台账{dash_note}，或随时一句话修改薪资、城市、外包/驻场开关与找岗模式",
             },
         ]
         menu_lines = [
             dash_spot["markdown"],
             "",
             "### 🚀 本地建档已完成！接下来想怎么试跑？（直接回数字 `1` 即可开始）",
-            f"1. **【推荐】立即去 BOSS 跑第一轮搜岗深筛预览** — 按 `{roles}`（`{cities}` · `{min_k}K+`）筛出 3～5 个靠谱自研岗、自动避开 {shield_cnt} 家前东家与外包，**先出破冰话术审阅单给你过目，未经你确认绝不点发送**",
+            (
+                f"1. **【推荐】立即去 BOSS 跑第一轮搜岗深筛并自动收藏** — 按 `{roles}`（`{cities}` · `{min_k}K+`）筛出靠谱自研岗、自动避开 {shield_cnt} 家前东家与外包，**只点「感兴趣」收藏攒入看板、绝不主动点立即沟通，由你自己看完再投**"
+                if is_fav
+                else f"1. **【推荐】立即去 BOSS 跑第一轮搜岗深筛预览** — 按 `{roles}`（`{cities}` · `{min_k}K+`）筛出 3～5 个靠谱自研岗、自动避开 {shield_cnt} 家前东家与外包，**先出破冰话术审阅单给你过目，未经你确认绝不点发送**"
+            ),
             "2. **粘贴单条岗位 JD 或 HR 消息让我参谋** — 替你排雷、挑匹配亮点、拟 1～2 句真人感回复草稿并同步记入本地看板台账",
             f"3. **在浏览器打开可视化求职看板 / 微调筛选条件** — 查看 6 维漏斗、待办队列与排雷记录，或随时调整筛选偏好{dash_note}",
         ]
@@ -1467,10 +1723,17 @@ def build_post_onboarding_guide(
         "recommended_action": recommended_action,
         "dashboard_path": dash_spot["dashboard_path"],
         "dashboard_url": dash_spot["file_url"],
+        "host_sidebar_supported": dash_spot["host_sidebar_supported"],
+        "sidebar_entry": dash_spot["sidebar_entry"],
         "dashboard_spotlight_markdown": dash_spot["markdown"],
         "agent_must_do": [
             "1. 若尚未将确认后的个人求职事实写入 profile_facts_path，请立即写入，并运行 `hiremate.py build-dashboard --open` 生成并自动在用户浏览器打开初始求职看板；",
-            "2. 【严禁把求职看板仅缩成一个不起眼的超链接！】必须在回复中完整展示上方独立的「📊 你的专属『本地可视化求职看板』已就绪！」介绍卡片，向用户讲清看板里的 6 维转化漏斗、约面置顶队列、外包/前东家排雷台账与策略总览（DSH 提醒随时可输 `/hiremate-dashboard` 一键弹开）；",
+            (
+                f"2. 【严禁把求职看板仅缩成一个不起眼的超链接！】必须在回复中完整展示上方独立的「📊 你的专属『本地可视化求职看板』已就绪！」介绍卡片，"
+                f"向用户讲清看板里的 6 维转化漏斗、约面置顶队列、外包/前东家排雷台账与策略总览，并明确提醒用户随时可通过当前客户端的{dash_spot['sidebar_entry']}找到看板（刚安装首次未见入口时重启客户端即显示）；"
+                if dash_spot["host_sidebar_supported"]
+                else "2. 【严禁把求职看板仅缩成一个不起眼的超链接！】必须在回复中完整展示上方独立的「📊 你的专属『本地可视化求职看板』已就绪！」介绍卡片，向用户讲清看板里的 6 维转化漏斗、约面置顶队列、外包/前东家排雷台账与策略总览（当前宿主无侧边栏面板，请勿提示去侧边栏查找）；"
+            ),
             "3. 【职位筛选策略全透明确认】若刚才尚未向用户完整展示全部 8 项筛选策略，必须在本次回复中把 `strategy_confirmation.markdown` 列给用户过目并询问是否要修改；",
             "4. 【严禁建完档停步冷场】必须在同一条回复末尾向用户清晰展示下方 `user_reply_menu_markdown` 的 1 / 2 / 3 下一步操作菜单，让用户直接回一个 `1` 就能开跑首轮实战。",
         ],
@@ -1501,6 +1764,7 @@ def init_workspace(
     execution_mode: str | None = None,
     browser_provider: str | None = None,
     resume_source: str | None = None,
+    mode_discover: str | None = None,
     tier: str = "free",
     force: bool = False,
     reset_profile: bool = False,
@@ -1584,8 +1848,18 @@ def init_workspace(
         init_patch["browser_provider"] = browser_provider
     if resume_source is not None:
         init_patch["resume_source"] = resume_source
+    if mode_discover is not None:
+        init_patch["mode_discover"] = mode_discover
     if init_patch:
         apply_config_updates(cfg, init_patch)
+
+    mode_downgrade_note = ""
+    if cfg.get("execution_mode") == "copilot" and cfg.get("mode_discover") in ("favorite", "auto"):
+        cfg["mode_discover"] = "semi"
+        mode_downgrade_note = "当前为副驾驶粘贴模式（copilot），无浏览器操控权限，找岗动作模式已自动回退为半自动（semi）。"
+    elif tier != "pro" and cfg.get("mode_discover") == "auto":
+        cfg["mode_discover"] = "semi"
+        mode_downgrade_note = "全自动破冰档位（auto）需激活 Pro 版，找岗动作模式已设为半自动（semi）。"
 
     saved_cfg = save_config(workspace, cfg)
 
@@ -1619,7 +1893,7 @@ def init_workspace(
         save_runtime_state(workspace, copy.deepcopy(DEFAULT_RUNTIME_STATE))
 
     dash_file = str((workspace / "dashboard.html").resolve())
-    return {
+    init_res: dict[str, Any] = {
         "ok": True,
         "workspace": str(workspace),
         "config_path": str(cfg_file),
@@ -1637,6 +1911,9 @@ def init_workspace(
             dashboard_path=dash_file,
         ),
     }
+    if mode_downgrade_note:
+        init_res["notice"] = mode_downgrade_note
+    return init_res
 
 
 def merge_employers(

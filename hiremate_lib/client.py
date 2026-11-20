@@ -521,8 +521,8 @@ def auth_device_login(
                 base_msg += " 检测到本机尚未建立求职档案，请先向用户报喜展示已解锁的 Pro 权益，再继续引导拖入 PDF 简历完成 5 分钟建档与策略确认。"
             elif active and (cfg.get("mode_discover") == "semi" or cfg.get("mode_reply") == "semi"):
                 base_msg += (
-                    " 请务必告知用户已解锁的 5 项 Pro 高级权益，并明确提示：当前「主动找岗」与「消息答疑」仍处于半自动（semi），"
-                    "现已支持一键切换为「全自动模式（auto）」并开启工作日自动巡检（展示 pro_activation_guide 菜单供用户选择）！"
+                    " 请务必告知用户已解锁的 5 项 Pro 高级权益，并明确提示：当前找岗/消息答疑尚有半自动（semi）项，"
+                    "现已支持切换为「全自动模式（auto）」或「找岗仅自动收藏（favorite）+ 答疑全自动」并开启工作日自动巡检（展示 pro_activation_guide 菜单供用户选择）！"
                 )
             auth_res: dict[str, Any] = {
                 "ok": True,
@@ -817,7 +817,7 @@ def auth_status(
         if show_activation_guide and ob["onboarding_completed"] and (
             cfg.get("mode_discover") == "semi" or cfg.get("mode_reply") == "semi"
         ):
-            status_msg += " 提示：当前主动找岗/消息答疑仍处于半自动（semi），请向用户介绍 Pro 5 项高级功能并询问是否切换为全自动模式（auto）与开启工作日自动巡检。"
+            status_msg += " 提示：当前找岗/消息答疑尚有半自动（semi）项，请向用户介绍 Pro 5 项高级功能并询问是否切换为全自动模式（auto）或「仅自动收藏+答疑全自动」及开启工作日巡检。"
         st_res: dict[str, Any] = {
             "ok": True,
             "authenticated": True,
@@ -999,6 +999,13 @@ def pro_patrol_gate(
     ledger = JobLedger(workspace)
     summary = ledger.summary()
     sched = cfg.get("schedule") or {}
+    mode_d = str(cfg.get("mode_discover") or "semi")
+    today_actions = int(
+        summary.get(
+            "today_outbound_actions",
+            int(summary.get("today_opening_sent", 0)) + int(summary.get("today_favorited", 0)),
+        )
+    )
 
     payload = {
         "now_iso": now_override or now_iso(),
@@ -1010,7 +1017,7 @@ def pro_patrol_gate(
             "discover_interval_minutes": int(sched.get("min_interval_minutes", 90)),
         },
         "runtime_state": {
-            "delivered_today": int(summary.get("today_opening_sent", 0)),
+            "delivered_today": today_actions,
             "main_busy": bool(rt.get("busy", False)),
             "main_busy_since": rt.get("busy_since"),
             "last_discover_at": rt.get("last_discover_at"),
@@ -1028,6 +1035,19 @@ def pro_patrol_gate(
         token=str(creds["token"]),
     )
     if status == 200 and data.get("ok"):
+        data["mode_discover"] = mode_d
+        is_due = bool(data.get("discover_due"))
+        data["allow_background_discover"] = is_due and mode_d in ("auto", "favorite")
+        if mode_d == "semi":
+            data["discover_action"] = "semi_review_only"
+            data["discover_hint"] = "当前 mode_discover=semi（半自动审阅）：手动对话可生成审阅单，后台定时巡检仅处理未读消息、跳过自动找岗。"
+        elif mode_d == "favorite":
+            data["discover_action"] = "favorite_only" if is_due else "cooldown"
+            data["discover_hint"] = (
+                "当前 mode_discover=favorite（仅自动收藏）：对通过深筛的职位仅点击 BOSS「感兴趣」收藏并记 status=favorited，严禁点击「立即沟通」发消息！"
+            )
+        else:
+            data["discover_action"] = "auto_icebreak" if is_due else "cooldown"
         return data
     return _graceful_pro_fallback("patrol_gate", status, data)
 
@@ -1207,3 +1227,132 @@ def pro_report_outsourcing(
         data.setdefault("tier", "pro")
         return data
     return _graceful_pro_fallback("report_outsourcing", status, data)
+
+
+ALLOWED_UI_PATCH_KEYS: frozenset[str] = frozenset(
+    {
+        "mode_discover",
+        "mode_reply",
+        "target_roles",
+        "preferred_cities",
+        "remote_bigtech_flex",
+        "min_salary_k",
+        "salary_match_mode",
+        "outsourcing_policy",
+        "onsite_policy",
+        "headhunter_policy",
+        "inbound_resume_policy",
+        "past_employers",
+        "blocked_companies",
+        "exclude_keywords",
+        "schedule",
+    }
+)
+
+
+def save_config_from_ui_patch(
+    *,
+    workspace: Path,
+    home: Path | None = None,
+    raw_patch: dict[str, Any],
+    ack_auto_risk: bool = False,
+) -> dict[str, Any]:
+    """供侧边栏看板 UI 表单直接校验并落盘保存策略配置（与 CLI config set 保持 100% 相同门控边界）。"""
+    from .workspace import apply_config_updates, build_strategy_confirmation_summary, save_config
+
+    if not isinstance(raw_patch, dict):
+        return {"ok": False, "code": "INVALID_PATCH", "error": "配置更新参数必须为 JSON 对象。"}
+
+    sanitized: dict[str, Any] = {}
+    for k, v in raw_patch.items():
+        if k not in ALLOWED_UI_PATCH_KEYS:
+            continue
+        if k == "schedule":
+            if isinstance(v, dict):
+                sched_clean = {
+                    sk: sv
+                    for sk, sv in v.items()
+                    if sk in ("weekdays_only", "max_per_round", "max_per_day", "min_interval_minutes", "active_windows")
+                }
+                if sched_clean:
+                    sanitized["schedule"] = sched_clean
+        else:
+            sanitized[k] = v
+
+    resolved_home = home or get_hiremate_home()
+    cfg = load_config(workspace)
+    was_already_auto = cfg.get("mode_discover") == "auto" or cfg.get("mode_reply") == "auto"
+    apply_config_updates(cfg, sanitized)
+
+    explicit_wants_favorite = sanitized.get("mode_discover") == "favorite"
+    explicit_wants_auto = sanitized.get("mode_discover") == "auto" or sanitized.get("mode_reply") == "auto"
+    wants_auto = cfg.get("mode_discover") == "auto" or cfg.get("mode_reply") == "auto"
+    notice = ""
+
+    if cfg.get("execution_mode") == "copilot" and cfg.get("mode_discover") == "favorite":
+        if explicit_wants_favorite:
+            return {
+                "ok": False,
+                "code": "FAVORITE_REQUIRES_BROWSER_MODE",
+                "error": "当前为副驾驶粘贴模式（copilot），无浏览器操控权限无法在网页点击「感兴趣」收藏；请先切换为浏览器直连或保持半自动（semi）。",
+            }
+        cfg["mode_discover"] = "semi"
+        notice = "当前处于副驾驶粘贴模式（copilot），找岗动作模式已同步为半自动（semi）。"
+
+    if wants_auto:
+        if cfg.get("execution_mode") == "copilot":
+            if explicit_wants_auto:
+                return {
+                    "ok": False,
+                    "code": "AUTO_REQUIRES_BROWSER_MODE",
+                    "error": "当前为副驾驶粘贴模式（copilot），无浏览器操控权限无法开启全自动发送；请先切换为浏览器直连模式。",
+                }
+            cfg["mode_discover"] = "semi"
+            cfg["mode_reply"] = "semi"
+            notice = "当前处于副驾驶粘贴模式（copilot），档位已同步回半自动（semi）。"
+        else:
+            creds = load_credentials(resolved_home)
+            if creds and creds.get("token") and creds.get("tier") != "pro":
+                try:
+                    auth_status(workspace=workspace, home=resolved_home)
+                    creds = load_credentials(resolved_home)
+                except Exception:
+                    pass
+            tier_live = "pro" if (creds and creds.get("tier") == "pro") else "free"
+            if tier_live != "pro":
+                if explicit_wants_auto:
+                    return {
+                        "ok": False,
+                        "code": "PRO_REQUIRED_FOR_AUTO",
+                        "error": "全自动档位（auto）属于 Pro 专业版权益；当前免费基础版支持「半自动审阅」或「仅自动收藏」。",
+                    }
+                if cfg.get("mode_discover") == "auto":
+                    cfg["mode_discover"] = "semi"
+                cfg["mode_reply"] = "semi"
+                notice = "当前未处于激活的 Pro 状态，全自动档位已自动回退为半自动（semi）。"
+            else:
+                if ack_auto_risk:
+                    cfg["auto_risk_acknowledged"] = True
+                elif not cfg.get("auto_risk_acknowledged", False) and not was_already_auto:
+                    return {
+                        "ok": False,
+                        "code": "AUTO_RISK_CONFIRMATION_REQUIRED",
+                        "requires_confirmation": True,
+                        "error": "首次开启全自动档位（auto）请先勾选下方的平台自动化风控护栏确认框。",
+                    }
+
+    try:
+        saved = save_config(workspace, cfg)
+    except ValueError as exc:
+        return {"ok": False, "code": "VALIDATION_ERROR", "error": str(exc)}
+
+    creds_now = load_credentials(resolved_home)
+    tier_now = "pro" if (creds_now and creds_now.get("tier") == "pro") else "free"
+    out: dict[str, Any] = {
+        "ok": True,
+        "config": saved,
+        "strategy_confirmation": build_strategy_confirmation_summary(saved, tier=tier_now),
+    }
+    if notice:
+        out["notice"] = notice
+    return out

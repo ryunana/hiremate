@@ -33,13 +33,19 @@ if HAS_PRO_SERVER:
     from server import build_server  # noqa: E402
 
 
-def _run_cli(args: list[str]) -> tuple[int, dict]:
+def _run_cli(args: list[str], *, env: dict[str, str] | None = None) -> tuple[int, dict]:
     from io import StringIO
     from contextlib import redirect_stdout
+    from unittest import mock as _mock
 
     buf = StringIO()
-    with redirect_stdout(buf):
-        rc = hiremate.main(args)
+    if env is not None:
+        with _mock.patch.dict(os.environ, env):
+            with redirect_stdout(buf):
+                rc = hiremate.main(args)
+    else:
+        with redirect_stdout(buf):
+            rc = hiremate.main(args)
     raw = buf.getvalue().strip()
     return rc, json.loads(raw) if raw else {}
 
@@ -220,6 +226,17 @@ class TestOpenPluginAndE2E(unittest.TestCase):
         self.assertTrue(gate_pro["ok"])
         self.assertTrue(gate_pro["in_active_window"])
         self.assertTrue(gate_pro["discover_due"])
+        self.assertFalse(gate_pro["allow_background_discover"])
+        self.assertEqual(gate_pro["discover_action"], "semi_review_only")
+
+        # 切换为 favorite 模式后，patrol-gate 放行后台静默收藏且明确标记 favorite_only
+        _run_cli(self._base_flags() + ["config", "set", "--mode-discover", "favorite"])
+        _, gate_fav = _run_cli(
+            self._base_flags() + ["pro", "patrol-gate", "--now", "2026-11-16T10:30:00+08:00"]
+        )
+        self.assertTrue(gate_fav["allow_background_discover"])
+        self.assertEqual(gate_fav["discover_action"], "favorite_only")
+        _run_cli(self._base_flags() + ["config", "set", "--mode-discover", "semi"])
 
         # 4. Pro 话术守卫拦截暴露代办口吻
         guard_input = {
@@ -846,7 +863,8 @@ console.log(JSON.stringify({{ skills, commands }}));
         self.assertIs(dash_empty_res.get("browser_opened"), False)
         self.assertIn("dashboard_spotlight", dash_empty_res)
         self.assertIn("本地可视化求职看板", dash_empty_res["dashboard_spotlight"]["markdown"])
-        self.assertIn("6 维实时投递转化漏斗", dash_empty_res["dashboard_spotlight"]["markdown"])
+        self.assertIn("7 格实时投递转化漏斗", dash_empty_res["dashboard_spotlight"]["markdown"])
+        self.assertIn("四大交互视图", dash_empty_res["dashboard_spotlight"]["markdown"])
         self.assertIn("post_onboarding_guide", dash_empty_res)
         self.assertIn("本地可视化求职看板", dash_empty_res["post_onboarding_guide"]["user_reply_menu_markdown"])
         ego_html = dash_ego.read_text(encoding="utf-8")
@@ -2139,6 +2157,982 @@ console.log(JSON.stringify({{ skills, commands }}));
             ]
         )
         self.assertFalse(out_gd_block["pass_basic"])
+
+    def test_interview_tracking_migration_rounds_dashboard_and_export(self) -> None:
+        """端到端验证：旧 9 状态库平滑迁移 -> 约面同步 -> 多轮面试/面经 -> Offer -> 看板面试Tab与日程 -> CSV/XLSX导出。"""
+        import sqlite3
+        from hiremate_lib import ledger as hm_ledger
+
+        ws = self.root / "ws_interviews"
+        home = self.root / "home_interviews"
+        ws.mkdir(parents=True, exist_ok=True)
+        flags = ["--workspace", str(ws), "--home", str(home)]
+
+        # 1. 构造旧版 9 状态表（无 interviewing/offer/offer_accepted 及 interview_scheduled_at/offer_at）并验证平滑迁移
+        legacy_db = ws / "ledger.sqlite3"
+        conn = sqlite3.connect(legacy_db)
+        old_9_sql = (
+            hm_ledger.SCHEMA_SQL.split("CREATE TABLE IF NOT EXISTS interview_rounds")[0]
+            .replace("        'interviewing',\n", "")
+            .replace("        'offer',\n", "")
+            .replace("        'offer_accepted',\n", "")
+            .replace("    interview_scheduled_at TEXT,\n", "")
+            .replace("    offer_at TEXT,\n", "")
+        )
+        conn.executescript(
+            old_9_sql
+            + """
+            INSERT INTO jobs (job_id, company, company_clean, company_core, title, title_norm, status, handed_off_at, created_at, updated_at)
+            VALUES ('job_iv_1', '星尘智能', '星尘智能', '星尘智能', 'AI Agent 产品经理', 'ai agent 产品经理', 'handed_off', '2026-11-18T10:00:00+08:00', '2026-11-18T09:00:00+08:00', '2026-11-18T10:00:00+08:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # 2. 通过 CLI 一条命令完成：约面状态流转 + 记录一面日程
+        rc, tr_res = _run_cli(
+            flags
+            + [
+                "ledger",
+                "transition",
+                "--job-id",
+                "job_iv_1",
+                "--status",
+                "interview_scheduled",
+                "--note",
+                "BOSS 聊天已敲定周四下午业务一面",
+                "--round",
+                "一面",
+                "--interview-time",
+                "2026-11-20 14:00",
+                "--interview-mode",
+                "腾讯会议",
+                "--interviewer",
+                "AI 业务负责人",
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(tr_res["to_status"], "interview_scheduled")
+        self.assertIn("interview_round", tr_res)
+        r1_id = tr_res["interview_round"]["round_id"]
+        self.assertEqual(tr_res["interview_round"]["outcome"], "pending")
+
+        # 3. 更新一面结果与面经复盘，再新增二面（验证自动推进到 interviewing）
+        rc_upd, upd_res = _run_cli(
+            flags
+            + [
+                "ledger",
+                "interview-update",
+                "--round-id",
+                r1_id,
+                "--outcome",
+                "passed",
+                "--summary",
+                "重点聊了 RAG 评测集和 Agent 容错，反馈很不错",
+            ]
+        )
+        self.assertEqual(rc_upd, 0)
+        self.assertEqual(upd_res["interview_round"]["outcome"], "passed")
+
+        rc_add, add_res = _run_cli(
+            flags
+            + [
+                "ledger",
+                "interview-add",
+                "--job-id",
+                "job_iv_1",
+                "--round",
+                "二面",
+                "--time",
+                "2026-11-22 15:30",
+                "--mode",
+                "现场面试 · 南山科技园",
+                "--interviewer",
+                "产研 VP",
+                "--summary",
+                "准备商业化 ROI 与跨部门推进案例",
+            ]
+        )
+        self.assertEqual(rc_add, 0)
+        self.assertEqual(add_res["job"]["status"], "interviewing")
+        self.assertEqual(add_res["status_transition"]["to_status"], "interviewing")
+
+        # 4. 另建一个 Offer 岗位并核验漏斗汇总与同公司防撞车保护
+        rc_off, off_res = _run_cli(
+            flags
+            + [
+                "ledger",
+                "transition",
+                "--company",
+                "青禾数科",
+                "--title",
+                "AI 平台产品专家",
+                "--status",
+                "offer",
+                "--note",
+                "口头 Offer 42K*15",
+                "--round",
+                "终面",
+                "--interview-time",
+                "2026-11-17 16:00",
+                "--interview-outcome",
+                "passed",
+                "--interview-summary",
+                "CTO 终面通过",
+            ]
+        )
+        self.assertEqual(rc_off, 0)
+        self.assertEqual(off_res["to_status"], "offer")
+
+        rc_sum, sum_res = _run_cli(flags + ["ledger", "summary"])
+        self.assertEqual(rc_sum, 0)
+        funnel = sum_res["summary"]["funnel"]
+        self.assertEqual(funnel["interview_total"], 2)
+        self.assertEqual(funnel["interview_active_total"], 1)
+        self.assertEqual(funnel["upcoming_interviews_count"], 1)
+        self.assertEqual(funnel["offer_count"], 1)
+
+        rc_dup, dup_res = _run_cli(
+            flags + ["ledger", "check-dup", "--company", "青禾数科", "--title", "大模型产品经理"]
+        )
+        self.assertEqual(rc_dup, 0)
+        self.assertTrue(dup_res["duplicate"])
+        self.assertTrue(dup_res["same_company_active"])
+
+        # 5. 生成看板并验证：7 格漏斗「面试与 Offer」、独立 tab-interviews、待面日程与多轮时间线
+        dash_out = ws / "dashboard.html"
+        rc_d, _ = _run_cli(flags + ["build-dashboard", "--out", str(dash_out)])
+        self.assertEqual(rc_d, 0)
+        html_text = dash_out.read_text(encoding="utf-8")
+        self.assertIn("面试与 Offer", html_text)
+        self.assertIn('id="tab-interviews"', html_text)
+        self.assertIn("即将到来的面试日程（1）", html_text)
+        self.assertIn("2026-11-22 15:30", html_text)
+        self.assertIn("重点聊了 RAG 评测集和 Agent 容错", html_text)
+        self.assertIn("Offer 与录用跟进（1）", html_text)
+        self.assertIn("青禾数科", html_text)
+        # 验证卡片视图 / 可交互漏斗图切换及点击联动结构
+        self.assertIn('id="kpi-cards-panel"', html_text)
+        self.assertIn('id="funnel-viz-panel"', html_text)
+        self.assertIn('data-funnel-view="cards"', html_text)
+        self.assertIn('data-funnel-view="funnel"', html_text)
+        self.assertIn('id="fv-inspector"', html_text)
+        self.assertIn('data-jump-filter="screened_skip"', html_text)
+
+        # 6. 验证 CSV 导出包含「面试轮次记录」列
+        csv_out = ws / "export.csv"
+        rc_csv, _ = _run_cli(flags + ["ledger", "export-csv", "--out", str(csv_out)])
+        self.assertEqual(rc_csv, 0)
+        csv_text = csv_out.read_text(encoding="utf-8-sig")
+        self.assertIn("面试轮次记录", csv_text)
+        self.assertIn("一面(已通过", csv_text)
+        self.assertIn("二面(待面试", csv_text)
+
+    def test_favorite_only_discover_mode_onboarding_ledger_and_dashboard(self) -> None:
+        """端到端验证：前期建档可选 favorite（仅自动收藏不投递）、旧12状态库平滑迁移、查重边界、看板队列与 Pro 巡检门控。"""
+        import sqlite3
+        from hiremate_lib import ledger as hm_ledger
+
+        ws = self.root / "ws_favorite"
+        home = self.root / "home_favorite"
+        ws.mkdir(parents=True, exist_ok=True)
+        flags = ["--workspace", str(ws), "--home", str(home)]
+
+        # 1. 新用户 Checklist 交互题包含第 3 组「找岗动作模式」（默认 semi 推荐 + favorite 可选）
+        rc_chk, chk_res = _run_cli(flags + ["checklist", "--builtin-headed-persistent", "true"])
+        self.assertEqual(rc_chk, 0)
+        iq = chk_res["interactive_questions"]
+        self.assertEqual(len(iq["question_batches"]), 3)
+        self.assertEqual(len(iq["questions"]), 8)
+        mode_q = iq["questions"][-1]
+        self.assertEqual(mode_q["id"], "discover_action_mode")
+        self.assertEqual(mode_q["options"][0]["value"], "semi")
+        self.assertIn("(Recommended)", mode_q["options"][0]["label"])
+        self.assertEqual(mode_q["options"][1]["value"], "favorite")
+
+        # 2. 构造无 favorited / favorited_at 的旧 12 状态 SQLite 库，验证自动无损迁移
+        legacy_db = ws / "ledger.sqlite3"
+        conn = sqlite3.connect(legacy_db)
+        old_12_sql = (
+            hm_ledger.SCHEMA_SQL.replace("        'favorited',\n", "")
+            .replace("    favorited_at TEXT,\n", "")
+        )
+        conn.executescript(
+            old_12_sql
+            + """
+            INSERT INTO jobs (job_id, company, company_clean, company_core, title, title_norm, status, created_at, updated_at)
+            VALUES ('job_old_disc', '云起智算', '云起智算', '云起智算', 'AI 产品经理', 'ai 产品经理', 'discovered', '2026-11-19T10:00:00+08:00', '2026-11-19T10:00:00+08:00');
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        # 3. 免费版 init 直接指定 --mode-discover favorite 成功生效（无需 Pro 或 --ack-auto-risk）
+        rc_init, init_res = _run_cli(
+            flags
+            + [
+                "init",
+                "--account-name",
+                "林远",
+                "--roles",
+                "AI产品经理,Agent产品经理",
+                "--cities",
+                "深圳,杭州",
+                "--min-salary-k",
+                "28",
+                "--employers",
+                "前东家智联",
+                "--resume-source",
+                "attachment_pdf",
+                "--mode-discover",
+                "favorite",
+            ]
+        )
+        self.assertEqual(rc_init, 0)
+        self.assertEqual(init_res["config"]["mode_discover"], "favorite")
+        self.assertIn("仅自动收藏", init_res["strategy_confirmation"]["markdown"])
+        self.assertEqual(
+            init_res["post_onboarding_guide"]["recommended_action"],
+            "run_free_first_round_boss_favorite",
+        )
+        Path(init_res["profile_facts_path"]).write_text("# 个人求职事实与答法档案\n- 5年AI产品经验\n", encoding="utf-8")
+
+        # 4. 写入 favorited 岗位：验证不虚增开场送达数、同公司相似岗查重拦截、同公司不同岗不误拦、网页已收藏标记拦截
+        rc_up, up_fav = _run_cli(
+            flags
+            + [
+                "ledger",
+                "upsert-job",
+                "--job-json",
+                json.dumps(
+                    {
+                        "company": "星辰大模型科技",
+                        "title": "高级 AI 产品经理",
+                        "salary": "32-45K",
+                        "city": "深圳·南山区",
+                        "recruiter_name": "周总监",
+                        "recruiter_title": "AI产品负责人",
+                        "match_reasons": "RAG 与 Agent 评测经验高度契合",
+                        "icebreaker": "您好，看咱们在招自研 AI 产品，我近两年主导过企业级 Agent 落地，方便聊聊吗？",
+                        "status": "favorited",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        self.assertEqual(rc_up, 0)
+        fav_job_id = up_fav["job"]["job_id"]
+        self.assertTrue(bool(up_fav["job"]["favorited_at"]))
+        self.assertIsNone(up_fav["job"]["opening_sent_at"])
+
+        _, sum1 = _run_cli(flags + ["ledger", "summary"])
+        self.assertEqual(sum1["summary"]["funnel"]["favorited_pending"], 1)
+        self.assertEqual(sum1["summary"]["funnel"]["favorited_total"], 1)
+        self.assertEqual(sum1["summary"]["funnel"]["opening_delivered_total"], 0)
+        self.assertEqual(sum1["summary"]["today_favorited"], 1)
+        self.assertEqual(sum1["summary"]["today_opening_sent"], 0)
+
+        # 同公司相似岗位 -> 查重拦截（防止重复点收藏变取消收藏）
+        _, dup_sim = _run_cli(flags + ["ledger", "check-dup", "--company", "星辰大模型科技", "--title", "AI产品经理"])
+        self.assertTrue(dup_sim["duplicate"])
+        self.assertTrue(dup_sim["same_company_favorited"])
+        self.assertFalse(dup_sim["same_company_active"])
+
+        # 同公司完全不同方向岗位 -> 允许独立评估（因为 favorited 未发起聊天，不触发连坐封杀）
+        _, dup_diff = _run_cli(flags + ["ledger", "check-dup", "--company", "星辰大模型科技", "--title", "iOS客户端研发工程师"])
+        self.assertFalse(dup_diff["duplicate"])
+
+        # 网页按钮已显示「取消感兴趣」-> --already-favorited 拦截
+        _, dup_ui = _run_cli(
+            flags + ["ledger", "check-dup", "--company", "另一家自研公司", "--title", "AI产品经理", "--already-favorited"]
+        )
+        self.assertTrue(dup_ui["duplicate"])
+        self.assertTrue(dup_ui["already_favorited"])
+
+        # 5. 构建看板验证：免费版徽标、待收藏审阅队列、筛选胶囊与参考破冰话术高亮
+        dash_file = ws / "dashboard.html"
+        rc_dash, _ = _run_cli(flags + ["build-dashboard", "--out", str(dash_file)])
+        self.assertEqual(rc_dash, 0)
+        dash_html = dash_file.read_text(encoding="utf-8")
+        self.assertIn("当前可用：单轮自动收藏（不主动投递）", dash_html)
+        self.assertIn("已自动收藏 · 待本人审阅投递（1）", dash_html)
+        self.assertIn('data-filter="favorited"', dash_html)
+        self.assertIn("已收藏·待本人投递", dash_html)
+        self.assertIn("仅自动收藏·不主动投递（单轮收藏", dash_html)
+
+        # 6. 用户看完觉得合适后发起沟通：favorited -> opening_sent，保留历史 favorited_total 计数且当日配额不重复双算
+        rc_tr, _ = _run_cli(flags + ["ledger", "transition", "--job-id", fav_job_id, "--status", "opening_sent"])
+        self.assertEqual(rc_tr, 0)
+        _, sum2 = _run_cli(flags + ["ledger", "summary"])
+        self.assertEqual(sum2["summary"]["funnel"]["favorited_pending"], 0)
+        self.assertEqual(sum2["summary"]["funnel"]["favorited_total"], 1)
+        self.assertEqual(sum2["summary"]["funnel"]["opening_delivered_total"], 1)
+        self.assertEqual(sum2["summary"]["today_favorited"], 1)
+        self.assertEqual(sum2["summary"]["today_opening_sent"], 1)
+        self.assertEqual(sum2["summary"]["today_outbound_actions"], 1)
+
+        # 7. copilot 无浏览器权限互斥、同传显式报错与 checklist 隐藏网页点击选项
+        rc_both, both_err = _run_cli(flags + ["config", "set", "--execution-mode", "copilot", "--mode-discover", "favorite"])
+        self.assertEqual(rc_both, 1)
+        self.assertEqual(both_err["code"], "FAVORITE_REQUIRES_BROWSER_MODE")
+
+        rc_cop, cop_res = _run_cli(flags + ["config", "set", "--execution-mode", "copilot"])
+        self.assertEqual(rc_cop, 0)
+        self.assertEqual(cop_res["config"]["mode_discover"], "semi")
+        self.assertIn("notice", cop_res)
+
+        _, chk_cop = _run_cli(flags + ["checklist", "--browser-capable", "false"])
+        self.assertEqual(len(chk_cop["interactive_questions"]["question_batches"]), 2)
+        self.assertEqual(len(chk_cop["interactive_questions"]["questions"]), 7)
+
+        rc_cop_fav, cop_fav_err = _run_cli(flags + ["config", "set", "--mode-discover", "favorite"])
+        self.assertEqual(rc_cop_fav, 1)
+        self.assertEqual(cop_fav_err["code"], "FAVORITE_REQUIRES_BROWSER_MODE")
+
+    def test_voice_profile_and_multi_host_sidebar_integration(self) -> None:
+        """端到端验证：跨宿主历史对话语气档案（去噪抽样/建档/改稿沉淀/看板联动）与 DSH/Codex/Antigravity 侧边栏挂载。"""
+        import time
+        from hiremate_lib import voice
+
+        ws = self.root / "voice_ws"
+        hm = self.root / "voice_home"
+        flags = ["--home", str(hm), "--workspace", str(ws)]
+
+        rc_init, _ = _run_cli(
+            flags
+            + [
+                "init",
+                "--account-name",
+                "林远",
+                "--roles",
+                "AI产品经理",
+                "--cities",
+                "深圳",
+                "--min-salary-k",
+                "28",
+                "--employers",
+                "示例科技",
+                "--resume-source",
+                "attachment_pdf",
+            ]
+        )
+        self.assertEqual(rc_init, 0)
+        (ws / "profile_facts.md").write_text("# 个人求职事实与答法档案\n- 5年自研 AI 应用产品经验\n", encoding="utf-8")
+        _run_cli(flags + ["build-dashboard"])
+
+        # 1. 空语气档案静默降级，不报错
+        rc_vs0, vs0 = _run_cli(flags + ["voice", "show"])
+        self.assertEqual(rc_vs0, 0)
+        self.assertFalse(vs0["ready"])
+        self.assertIn("尚未建立个人求职语气档案", vs0["text"])
+
+        _, cfg0 = _run_cli(flags + ["config", "show"])
+        self.assertFalse(cfg0["voice_profile_ready"])
+        self.assertEqual(cfg0["voice_profile_text"], "")
+
+        # 2. 构造多宿主模拟历史会话，验证求职语域去噪（保留自然短句/成段表达，剔除代码块/粘贴JD/短指令）
+        mock_hosts_dir = self.root / "mock_voice_hosts"
+        dsh_sdir = mock_hosts_dir / "dsh" / "sessions" / "ws1" / "session-01"
+        dsh_sdir.mkdir(parents=True)
+        now_ms = int(time.time() * 1000)
+        dsh_events = [
+            # 合法短句样本（含斜杠命令前缀应被自动剥离）
+            {
+                "type": "user/message",
+                "time": now_ms - 3000,
+                "data": {
+                    "source": {"kind": "user"},
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "/hiremate 其实我平时跟业务方沟通比较直接，一般两句话把核心场景和上线指标讲清楚，不太爱加波浪号",
+                        }
+                    ],
+                },
+            },
+            # skill 注入消息（source.kind != user，必须排除）
+            {
+                "type": "user/message",
+                "time": now_ms - 2500,
+                "data": {
+                    "source": {"kind": "skill-invocation"},
+                    "content": [{"type": "text", "text": "这是一段系统自动注入的技能长指令文本，绝不能当成用户本人语气"}],
+                },
+            },
+            # 用户粘贴的外部招聘 JD（必须被去噪器拦截排除）
+            {
+                "type": "user/message",
+                "time": now_ms - 2000,
+                "data": {
+                    "source": {"kind": "user"},
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "岗位职责：1. 负责大模型平台规划；2. 协同算法团队。任职要求：本科及以上学历，3年以上产品经验。",
+                        }
+                    ],
+                },
+            },
+            # 纯短指令（必须排除）
+            {
+                "type": "user/message",
+                "time": now_ms - 1000,
+                "data": {"source": {"kind": "user"}, "content": [{"type": "text", "text": "继续"}]},
+            },
+        ]
+        (dsh_sdir / "session.v2.jsonl").write_text(
+            "\n".join(json.dumps(e, ensure_ascii=False) for e in dsh_events) + "\n",
+            encoding="utf-8",
+        )
+
+        claude_pdir = mock_hosts_dir / "claude" / "projects" / "proj1"
+        claude_pdir.mkdir(parents=True)
+        claude_ev = {
+            "type": "user",
+            "isSidechain": False,
+            "message": {
+                "role": "user",
+                "content": (
+                    "这块我之前带 6 个研发从 0 到 1 做过企业知识库 RAG 评测体系，把问答准确率从 62% 提到了 89%，"
+                    "但我平时从不说赋能和抓手这种词\n```python\nprint('code block should be stripped')\n```"
+                ),
+            },
+        }
+        (claude_pdir / "conv1.jsonl").write_text(json.dumps(claude_ev, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        codex_sdir = mock_hosts_dir / "codex" / "sessions" / "2026" / "11" / "20"
+        codex_sdir.mkdir(parents=True)
+        codex_ev = {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "给对方发附件简历的时候我就习惯简单说一句：好的，附件简历刚发您了，方便时请过目",
+                    }
+                ],
+            },
+        }
+        (codex_sdir / "rollout-1.jsonl").write_text(json.dumps(codex_ev, ensure_ascii=False) + "\n", encoding="utf-8")
+
+        col_res = voice.collect_voice_corpus(
+            ws,
+            host_roots_override={
+                "dsh": mock_hosts_dir / "dsh",
+                "claude": mock_hosts_dir / "claude",
+                "codex": mock_hosts_dir / "codex",
+            },
+        )
+        self.assertTrue(col_res["ok"])
+        self.assertTrue(col_res["corpus_ready"])
+        self.assertEqual(col_res["picked_messages"], 3)
+        corpus_text = Path(col_res["corpus_path"]).read_text(encoding="utf-8")
+        self.assertIn("不太爱加波浪号", corpus_text)
+        self.assertIn("RAG 评测体系", corpus_text)
+        self.assertIn("方便时请过目", corpus_text)
+        self.assertNotIn("code block should be stripped", corpus_text)
+        self.assertNotIn("任职要求", corpus_text)
+        self.assertNotIn("系统自动注入的技能长指令", corpus_text)
+
+        # 3. 保存语气档案 + 自动同步刷新本地看板 + note 增量沉淀
+        sample_profile = (
+            "# 个人求职语气档案\n"
+            "更新：2026-11-20 · 样本来源：3 条本机对话语料\n\n"
+            "## 1. 句长节奏与标点指纹\n"
+            "- 偏好两句内讲清核心事实，句末常省句号，不用波浪号「～」\n\n"
+            "## 4. 分场景求职声线\n"
+            "- 递简历附言：「好的，附件简历刚发您了，方便时请过目」\n"
+        )
+        rc_sv, sv_res = _run_cli(flags + ["voice", "save", "--text", sample_profile])
+        self.assertEqual(rc_sv, 0)
+        self.assertTrue(sv_res.get("dashboard_refreshed"))
+
+        rc_nt, nt_res = _run_cli(flags + ["voice", "note", "把『贵团队』统一改为『咱们团队』"])
+        self.assertEqual(rc_nt, 0)
+        self.assertEqual(nt_res["voice_status"]["learned_notes_count"], 1)
+
+        _, cfg1 = _run_cli(flags + ["config", "show"])
+        self.assertTrue(cfg1["voice_profile_ready"])
+        self.assertIn("方便时请过目", cfg1["voice_profile_text"])
+        self.assertIn("咱们团队", cfg1["voice_profile_text"])
+
+        dash_html = (ws / "dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("个人求职语气档案（本人行文风格指纹 · 仅存本机）", dash_html)
+        self.assertIn("已启用", dash_html)
+        self.assertIn("方便时请过目", dash_html)
+
+        rc_clr, _ = _run_cli(flags + ["voice", "clear", "--corpus-only"])
+        self.assertEqual(rc_clr, 0)
+        self.assertFalse((ws / "voice_corpus.md").exists())
+        self.assertTrue((ws / "voice_profile.md").is_file())
+
+        # 4. 验证 DSH / Codex / Antigravity 三端侧边栏安装、Node 语法与客户端槽位协议
+        for js_file in (
+            OPEN_ROOT / "dsh" / "index.mjs",
+            OPEN_ROOT / "dsh" / "client.js",
+            OPEN_ROOT / "antigravity" / "sidecar" / "main.mjs",
+        ):
+            chk_js = subprocess.run(["node", "--check", str(js_file)], capture_output=True, text=True)
+            self.assertEqual(chk_js.returncode, 0, f"{js_file} syntax error: {chk_js.stderr}")
+
+        # 验证 DSH client.js 的 __ModuleLoader__.load ID 严格等于 package.json name ("hiremate-dsh") 并成对注册 sidebar.panellist 与 main
+        client_check_script = f"""
+import fs from 'node:fs';
+import vm from 'node:vm';
+let loaded = null;
+const slots = [];
+let startedSession = null;
+const sandbox = {{
+  window: {{
+    __ModuleLoader__: {{ load: (spec) => {{ loaded = spec; }} }},
+  }},
+  location: {{ origin: 'http://127.0.0.1:4321' }},
+  navigator: {{ language: 'zh-CN' }},
+  addEventListener: () => {{}},
+  removeEventListener: () => {{}},
+  Date,
+  Symbol,
+  Object,
+  String,
+  console,
+}};
+vm.runInNewContext(fs.readFileSync({json.dumps(str(OPEN_ROOT / 'dsh' / 'client.js'))}, 'utf-8'), sandbox);
+const fakeReact = {{
+  createElement: (tag, props, ...children) => ({{ tag, props, children }}),
+  useRef: (v) => ({{ current: v }}),
+  useState: (init) => [typeof init === 'function' ? init() : init, () => {{}}],
+  useEffect: () => {{}},
+}};
+const mod = loaded.factory((id) => {{
+  if (id === 'react') return fakeReact;
+  throw new Error('unexpected require: ' + id);
+}});
+mod.apply({{
+  inject: () => {{}},
+  slots: {{
+    inject: (_slot, fn) => fn(),
+    register: (meta) => {{ slots.push({{ name: meta.name, id: meta.id || null, key: meta.key || null, label: meta.label ? meta.label() : null }}); }},
+  }},
+  uiWorkspace: {{ startSession: (_id, opts) => {{ startedSession = opts; }} }},
+}});
+console.log(JSON.stringify({{ id: loaded.id, isPlugin: mod.isPlugin, slots }}));
+"""
+        c_proc = subprocess.run(["node", "--input-type=module", "-e", client_check_script], capture_output=True, text=True)
+        self.assertEqual(c_proc.returncode, 0, c_proc.stderr)
+        c_info = json.loads(c_proc.stdout.strip())
+        self.assertEqual(c_info["id"], "hiremate-dsh")
+        self.assertTrue(c_info["isPlugin"])
+        self.assertEqual(
+            c_info["slots"],
+            [
+                {"name": "sidebar.panellist", "id": "hiremate", "key": None, "label": "求职助手"},
+                {"name": "main", "id": None, "key": "hiremate", "label": None},
+            ],
+        )
+
+        # 验证多宿主安装器在沙盒中挂载 DSH（含 - insert: 升级）、Codex（含 MCP 侧栏）与 Antigravity（含 SIDEBAR sidecar）
+        sb_canon = self.root / "sb_canon"
+        sb_dsh = self.root / "sb_dsh"
+        (sb_dsh / "profiles" / "desktop" / "node_modules").mkdir(parents=True)
+        # 模拟旧版缺少 - insert: 的遗留补丁，验证自动修复为合法的 - insert: + 包名
+        (sb_dsh / "profiles" / "desktop" / "cordis.patch.yml").write_text(
+            '# hiremate-dsh:begin\n- id: hiremate-dsh\n  name: "/old/index.mjs"\n# hiremate-dsh:end\n',
+            encoding="utf-8",
+        )
+        sb_codex = self.root / "sb_codex"
+        sb_codex.mkdir()
+        sb_agy = self.root / "sb_agy"
+        sb_agy.mkdir()
+
+        inst_all = install_plugin.install(
+            target="auto",
+            canonical_home=str(sb_canon),
+            search_roots={"dsh": sb_dsh, "codex": sb_codex, "antigravity": sb_agy},
+        )
+        self.assertTrue(inst_all["ok"])
+        patched_dsh_yml = (sb_dsh / "profiles" / "desktop" / "cordis.patch.yml").read_text(encoding="utf-8")
+        self.assertIn("- insert:\n    - id: hiremate-dsh\n      name: \"hiremate-dsh\"", patched_dsh_yml)
+        self.assertTrue((sb_canon / "dsh-plugin" / "client.js").is_file())
+        self.assertTrue((sb_canon / "dsh-plugin" / "icon.svg").is_file())
+
+        codex_reg = inst_all["sidebar_registrations"]["codex"]
+        self.assertTrue(codex_reg["registered"])
+        self.assertTrue(Path(codex_reg["cache_dir"]).joinpath(".codex-plugin", "plugin.json").is_file())
+        self.assertTrue(Path(codex_reg["cache_dir"]).joinpath(".mcp.json").is_file())
+
+        agy_sidecar_json = json.loads(
+            (sb_agy / "sidecars" / "hiremate_board" / "sidecar.json").read_text(encoding="utf-8")
+        )
+        entrypoints = [v["entrypoint"] for v in agy_sidecar_json["ui_config"]["views"]]
+        self.assertIn("SIDECAR_UI_ENTRYPOINT_SIDEBAR", entrypoints)
+        self.assertIn("SIDECAR_UI_ENTRYPOINT_AUX_PANE", entrypoints)
+
+        # 5. 端到端验证 Codex MCP App stdio 协议（initialize -> tools/list -> resources/read -> tools/call）
+        mcp_proc = subprocess.Popen(
+            [sys.executable, str(OPEN_ROOT / "hiremate.py"), "--home", str(hm), "--workspace", str(ws), "mcp-serve"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert mcp_proc.stdin is not None and mcp_proc.stdout is not None
+
+            def rpc(req_id: int, method: str, params: dict | None = None) -> dict:
+                line = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params or {}}) + "\n"
+                mcp_proc.stdin.write(line)
+                mcp_proc.stdin.flush()
+                resp_line = mcp_proc.stdout.readline()
+                self.assertTrue(resp_line, "MCP server returned EOF")
+                return json.loads(resp_line)
+
+            r_init_mcp = rpc(1, "initialize", {"protocolVersion": "2025-06-18", "clientInfo": {"name": "codex"}})
+            self.assertEqual(r_init_mcp["result"]["serverInfo"]["name"], "hiremate")
+
+            r_tools = rpc(2, "tools/list")
+            tools_by_name = {t["name"]: t for t in r_tools["result"]["tools"]}
+            self.assertIn("hiremate_home", tools_by_name)
+            self.assertEqual(
+                tools_by_name["hiremate_home"]["_meta"]["openai/ui"]["entrypoints"],
+                [{"type": "global"}],
+            )
+            page_uri = tools_by_name["hiremate_home"]["_meta"]["ui"]["resourceUri"]
+            self.assertTrue(page_uri.startswith("ui://hiremate/"))
+
+            r_read = rpc(3, "resources/read", {"uri": page_uri})
+            contents = r_read["result"]["contents"][0]
+            self.assertEqual(contents["mimeType"], "text/html;profile=mcp-app")
+            self.assertIn("ui/initialize", contents["text"])
+
+            r_call = rpc(4, "tools/call", {"name": "hiremate_home", "arguments": {}})
+            snap = r_call["result"]["structuredContent"]
+            self.assertTrue(snap["ok"])
+            self.assertTrue(snap["voice_ready"])
+            self.assertIn("方便时请过目", snap["dashboard_html"])
+            self.assertIn('id="hm-strategy-form"', snap["dashboard_html"])
+            self.assertIn('id="hm-cfg-mode-discover"', snap["dashboard_html"])
+
+            # 验证在侧栏看板页面直接修改求职策略选项并保存后，立即落盘且后续 Agent 调用自动按新配置执行（且过滤非法字段）
+            r_save = rpc(
+                5,
+                "tools/call",
+                {
+                    "name": "hiremate_ui_save_config",
+                    "arguments": {
+                        "patch": {
+                            "mode_discover": "favorite",
+                            "min_salary_k": 35,
+                            "salary_match_mode": "floor_strict",
+                            "outsourcing_policy": "inbound_only",
+                            "past_employers": ["旧东家A", "新增前东家B"],
+                            "blocked_companies": ["额外屏蔽竞对C"],
+                            "schedule": {"max_per_round": 4, "max_per_day": 15, "weekdays_only": True},
+                            "api_base": "https://evil-attacker.example.com",
+                        }
+                    },
+                },
+            )
+            saved_sc = r_save["result"]["structuredContent"]
+            self.assertTrue(saved_sc["ok"])
+            self.assertEqual(saved_sc["config"]["mode_discover"], "favorite")
+            self.assertEqual(saved_sc["config"]["min_salary_k"], 35)
+            self.assertEqual(saved_sc["config"]["salary_match_mode"], "floor_strict")
+            self.assertEqual(saved_sc["config"]["outsourcing_policy"], "inbound_only")
+            self.assertIn("新增前东家B", saved_sc["config"]["blocked_companies"])
+            self.assertIn("额外屏蔽竞对C", saved_sc["config"]["blocked_companies"])
+            self.assertNotEqual(saved_sc["config"]["api_base"], "https://evil-attacker.example.com")
+            self.assertIn("单轮自动收藏（不主动投递）", saved_sc["snapshot"]["dashboard_html"])
+
+            # Agent 紧接着调用 CLI 时零延迟读取最新保存的策略（例如 floor_strict 35K 拦截 30-42K 岗位，且新增前东家B立即防撞生效）
+            _, after_show = _run_cli(flags + ["config", "show"])
+            self.assertEqual(after_show["config"]["mode_discover"], "favorite")
+            self.assertEqual(after_show["config"]["min_salary_k"], 35)
+            _, scr_low_floor = _run_cli(
+                flags + ["screen-basic", "--company", "星海自研软件", "--title", "AI产品经理", "--salary", "30-42K"]
+            )
+            self.assertFalse(scr_low_floor["pass_basic"])
+            _, dup_new_emp = _run_cli(
+                flags + ["ledger", "check-dup", "--company", "新增前东家B科技有限公司", "--title", "AI产品经理"]
+            )
+            self.assertTrue(dup_new_emp["duplicate"])
+            self.assertTrue(dup_new_emp["blocked_employer"])
+        finally:
+            mcp_proc.terminate()
+            mcp_proc.wait(timeout=5)
+            for pipe in (mcp_proc.stdin, mcp_proc.stdout, mcp_proc.stderr):
+                if pipe:
+                    pipe.close()
+
+        # 6. 验证 DSH client.js 在第三方扩展（如 dsh-web-all）覆写 startSession 丢弃 options 时仍能写草稿并自动发送
+        import shutil
+        node_bin = shutil.which("node")
+        if node_bin:
+            client_js_path = str(OPEN_ROOT / "dsh" / "client.js")
+            node_test_script = r"""
+const fs = require('node:fs');
+const clientPath = process.argv[1];
+let registeredPlugin = null;
+let messageHandler = null;
+global.location = { origin: 'http://127.0.0.1:3082' };
+global.navigator = { language: 'zh-CN' };
+global.requestAnimationFrame = (cb) => setImmediate(cb);
+global.addEventListener = (ev, fn) => { if (ev === 'message') messageHandler = fn; };
+global.removeEventListener = () => {};
+global.window = global;
+global.window.__ModuleLoader__ = {
+  load(spec) { registeredPlugin = spec; }
+};
+const fakeFrameWin = {};
+const fakeReact = {
+  createElement: (tag, props) => ({ tag, props }),
+  useRef: () => ({ current: { contentWindow: fakeFrameWin } }),
+  useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+  useEffect: (fn) => { fn(); },
+};
+eval(fs.readFileSync(clientPath, 'utf8'));
+const mod = registeredPlugin.factory((id) => {
+  if (id === 'react') return fakeReact;
+  throw new Error('unexpected require: ' + id);
+});
+const log = [];
+class FakeUiWorkspace {
+  startSession(wsId, opts) { log.push({ call: 'protoStart', wsId, opts }); }
+  async openWorkspace(wsId, beforeOpen) {
+    log.push({ call: 'openWorkspace', wsId });
+    if (beforeOpen) beforeOpen('sess-blank-1');
+  }
+}
+const uiWorkspace = new FakeUiWorkspace();
+// 模拟 dsh-web-all auto-isolation 覆写实例方法并吞掉第二个参数 options
+uiWorkspace.startSession = (wsId) => { log.push({ call: 'monkeyStartDroppedOpts', wsId }); };
+
+let currentDraft = '';
+const shell = {
+  state: { getSnapshot: () => ({ draft: currentDraft, phase: 'plain' }) },
+  actions: {
+    setDraft: (t) => { currentDraft = t; log.push({ call: 'setDraft', text: t }); },
+    submit: () => { log.push({ call: 'submit', draft: currentDraft }); },
+  },
+  focus: () => { log.push({ call: 'focus', draft: currentDraft }); },
+};
+const binding = {
+  sessionId: 'sess-blank-1',
+  ctx: {},
+  session: {
+    open: async () => { log.push({ call: 'sessionOpen' }); },
+    getSnapshot: () => ({ openState: 'open' }),
+  },
+};
+const services = {
+  workspaces: { list: { getSnapshot: () => ({ items: [{ workspaceId: 'ws-main', sessionIds: ['sess-blank-1'] }] }) } },
+  sessions: {
+    list: { getSnapshot: () => ({ byId: { 'sess-blank-1': { id: 'sess-blank-1', updatedAt: 100 } } }) },
+    binding: (id) => (id === 'sess-blank-1' ? binding : undefined),
+  },
+  conversation: {
+    input: {
+      requestDraftInitialization: (_b, opts) => {
+        currentDraft = opts.prompt || '';
+        log.push({ call: 'requestDraftInit', prompt: currentDraft });
+        return 'applied';
+      },
+      for: () => shell,
+    },
+  },
+};
+let mainComp = null;
+mod.apply({
+  uiWorkspace,
+  inject: (deps, cb) => {
+    const bag = {};
+    for (const d of deps) if (services[d]) bag[d] = services[d];
+    cb(bag);
+  },
+  get: (k) => services[k],
+  slots: {
+    inject: (_slot, fn) => fn(),
+    register: (meta, comp) => { if (meta.name === 'main') mainComp = comp; },
+  },
+});
+mainComp();
+(async () => {
+  messageHandler({
+    source: fakeFrameWin,
+    origin: 'http://127.0.0.1:3082',
+    data: { type: 'hiremate:start', prompt: '/hiremate 帮我初始化求职助手', autoSend: true },
+  });
+  await new Promise((r) => setTimeout(r, 40));
+  messageHandler({
+    source: fakeFrameWin,
+    origin: 'http://127.0.0.1:3082',
+    data: { type: 'hiremate:start', prompt: '/hiremate 请补充粘贴样本：\n\n', autoSend: false },
+  });
+  await new Promise((r) => setTimeout(r, 40));
+  process.stdout.write(JSON.stringify(log));
+})();
+"""
+            node_res = subprocess.run(
+                [node_bin, "-e", node_test_script, client_js_path],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            dsh_calls = json.loads(node_res.stdout)
+            call_names = [c["call"] for c in dsh_calls]
+            self.assertNotIn("monkeyStartDroppedOpts", call_names)
+            self.assertIn("openWorkspace", call_names)
+            self.assertIn("requestDraftInit", call_names)
+            self.assertIn("submit", call_names)
+            self.assertIn("focus", call_names)
+            submitted = [c for c in dsh_calls if c["call"] == "submit"]
+            self.assertEqual(len(submitted), 1)
+            self.assertEqual(submitted[0]["draft"], "/hiremate 帮我初始化求职助手")
+
+        # 7. 验证「仅在支持侧边栏看板的 Agent 中主动提示侧边栏入口，不支持侧边栏的宿主绝不误导」
+        from hiremate_lib import workspace as hm_ws
+
+        dsh_host_info = hm_ws.detect_runtime_agent_host(
+            argv0="/Users/demo/.dsh/skills/hiremate/hiremate.py", environ={}
+        )
+        self.assertTrue(dsh_host_info["sidebar_supported"])
+        self.assertEqual(dsh_host_info["host"], "dsh")
+
+        wb_host_info = hm_ws.detect_runtime_agent_host(
+            argv0="/Users/demo/.workbuddy/skills/hiremate/hiremate.py", environ={}
+        )
+        self.assertFalse(wb_host_info["sidebar_supported"])
+        self.assertEqual(wb_host_info["host"], "workbuddy")
+
+        _, chk_dsh = _run_cli(flags + ["checklist", "--builtin-headed-persistent", "true"], env={"HIREMATE_HOST": "dsh"})
+        self.assertTrue(chk_dsh["host_sidebar_guide"]["sidebar_supported"])
+        self.assertIn("左侧边栏", chk_dsh["markdown"])
+        self.assertIn("侧边栏随时直达", chk_dsh["post_onboarding_guide"]["dashboard_spotlight_markdown"])
+
+        _, chk_codex = _run_cli(flags + ["checklist", "--builtin-headed-persistent", "true"], env={"HIREMATE_HOST": "codex"})
+        self.assertTrue(chk_codex["host_sidebar_guide"]["sidebar_supported"])
+        self.assertIn("左侧边栏", chk_codex["post_onboarding_guide"]["dashboard_spotlight_markdown"])
+
+        _, chk_wb = _run_cli(flags + ["checklist", "--builtin-headed-persistent", "true"], env={"HIREMATE_HOST": "workbuddy"})
+        self.assertFalse(chk_wb["host_sidebar_guide"]["sidebar_supported"])
+        self.assertNotIn("侧边栏", chk_wb["markdown"])
+        self.assertNotIn("侧边栏", chk_wb["post_onboarding_guide"]["dashboard_spotlight_markdown"])
+
+        sb_guide_dsh = install_plugin._build_sidebar_install_guide("dsh", inst_all["sidebar_registrations"])
+        self.assertTrue(sb_guide_dsh["current_host_supports_sidebar"])
+        self.assertIn("左侧边栏", sb_guide_dsh["next_step"])
+        sb_guide_wb = install_plugin._build_sidebar_install_guide("workbuddy", inst_all["sidebar_registrations"])
+        self.assertFalse(sb_guide_wb["current_host_supports_sidebar"])
+        self.assertNotIn("侧边栏", sb_guide_wb["next_step"])
+
+        # 验证卸载干净移除三端侧边栏构件且保留用户工作区数据
+        un_all = install_plugin.uninstall(
+            canonical_home=str(sb_canon),
+            search_roots={"dsh": sb_dsh, "codex": sb_codex, "antigravity": sb_agy},
+            purge_data=False,
+        )
+        self.assertTrue(un_all["ok"])
+        self.assertFalse((sb_agy / "sidecars" / "hiremate_board").exists())
+        self.assertFalse((sb_codex / "plugins" / "cache" / "hiremate").exists())
+        self.assertEqual((sb_dsh / "profiles" / "desktop" / "cordis.patch.yml").read_text(encoding="utf-8").strip(), "")
+
+    def test_code_review_hardening_regressions(self) -> None:
+        """覆盖 Code Review 修复项：敏感凭证脱敏、config set --employers、Antigravity /preload.js 注入、DSH 无注释补丁升级卸载、MCP LSP Content-Length 帧。"""
+        from hiremate_lib import mcp_server as hm_mcp
+        from hiremate_lib import voice as hm_voice
+        import install_plugin
+
+        # 1. voice.py 跨会话敏感密钥/Token/口令/身份证号自动脱敏，且 XML 同名闭合标签不误吞用户正文
+        cleaned_sec = hm_voice._clean_user_utterance(
+            "<system-reminder>internal note</system-reminder>"
+            "我平时写接口说明其实习惯先列清楚边界，测试 key 是 sk-proj-AbCdEf1234567890GhIjKlMnOp，密码：MyPass9988，身份证 44030519950816123X，还有</system-reminder>后面的正文也保留"
+        )
+        self.assertIsNotNone(cleaned_sec)
+        assert cleaned_sec is not None
+        self.assertNotIn("sk-proj-", cleaned_sec)
+        self.assertNotIn("MyPass9988", cleaned_sec)
+        self.assertNotIn("44030519950816123X", cleaned_sec)
+        self.assertIn("[密钥]", cleaned_sec)
+        self.assertIn("[敏感凭证]", cleaned_sec)
+        self.assertIn("[身份证号]", cleaned_sec)
+        self.assertIn("后面的正文也保留", cleaned_sec)
+
+        # 2. config set --employers 正常支持且自动同步进 blocked_companies；voice note 兼容带括号补充的标题与 Updated 行
+        hm = self.root / "hm-rev"
+        ws = hm / "default"
+        flags = ["--home", str(hm), "--workspace", str(ws)]
+        _run_cli(flags + ["init", "--roles", "AI产品经理", "--employers", "初始前东家A"])
+        code_emp, res_emp = _run_cli(flags + ["config", "set", "--employers", "初始前东家A,新增前东家X"])
+        self.assertEqual(code_emp, 0)
+        self.assertIn("新增前东家X", res_emp["config"]["past_employers"])
+        self.assertIn("新增前东家X", res_emp["config"]["blocked_companies"])
+
+        hm_voice.save_voice_profile(
+            ws,
+            "# 个人求职语气档案\nUpdated: 2026-11-01\n\n## 5. 审阅与改稿中学到的（持续沉淀）\n- 2026-11-01：不用感叹号\n",
+        )
+        note_res = hm_voice.add_voice_note(ws, "递简历附言改为简短自然")
+        self.assertEqual(note_res["voice_status"]["learned_notes_count"], 2)
+
+        # 3. DSH 空新配置目录（尚无 node_modules）也能自动挂上插件包，且 DSH 重写去掉注释后的 cordis.patch.yml 可干净升级与卸载
+        rev_canon = self.root / "rev-canon"
+        rev_dsh = self.root / "rev-dsh"
+        rev_codex = self.root / "rev-codex"
+        rev_agy = self.root / "rev-agy"
+        (rev_dsh / "profiles" / "desktop").mkdir(parents=True)
+        rev_codex.mkdir(parents=True)
+        (rev_dsh / "profiles" / "desktop" / "cordis.patch.yml").write_text(
+            "plugins:\n  hiremate-dsh:\n    homeDir: /old/path\n  other-plugin: {}\n",
+            encoding="utf-8",
+        )
+        (rev_codex / "config.toml").write_text(
+            '# 用户保留注释\nmodel = "gpt-5"\n\n[marketplaces.hiremate]\nsource_type = "local"\nsource = "/old"\n',
+            encoding="utf-8",
+        )
+        (rev_agy / "sidecars").mkdir(parents=True)
+
+        inst = install_plugin.install(
+            canonical_home=str(rev_canon),
+            search_roots={"dsh": rev_dsh, "codex": rev_codex, "antigravity": rev_agy},
+        )
+        self.assertTrue(inst["ok"])
+        self.assertTrue((rev_dsh / "profiles" / "desktop" / "node_modules" / "hiremate-dsh").exists())
+        agy_sc_cfg = json.loads((rev_agy / "sidecars" / "hiremate_board" / "sidecar.json").read_text(encoding="utf-8"))
+        self.assertEqual(agy_sc_cfg["restart_policy"], "always")
+        self.assertIn("HIREMATE_CLI_PATH", agy_sc_cfg["env"])
+        agy_main_src = (rev_agy / "sidecars" / "hiremate_board" / "main.mjs").read_text(encoding="utf-8")
+        self.assertIn('<script src="/preload.js"></script>', agy_main_src)
+        codex_toml = (rev_codex / "config.toml").read_text(encoding="utf-8")
+        self.assertEqual(codex_toml.count("[marketplaces.hiremate]"), 1)
+        self.assertEqual(codex_toml.count('[plugins."hiremate@hiremate"]'), 1)
+
+        # 模拟 DSH 运行时重序列化去掉 # hiremate-dsh 注释块后执行 uninstall
+        (rev_dsh / "profiles" / "desktop" / "cordis.patch.yml").write_text(
+            "- insert:\n    - id: other-plugin\n      name: other-plugin\n- insert:\n    - id: hiremate-dsh\n      name: hiremate-dsh\n",
+            encoding="utf-8",
+        )
+        install_plugin.uninstall(
+            canonical_home=str(rev_canon),
+            search_roots={"dsh": rev_dsh, "codex": rev_codex, "antigravity": rev_agy},
+        )
+        after_patch = (rev_dsh / "profiles" / "desktop" / "cordis.patch.yml").read_text(encoding="utf-8")
+        self.assertNotIn("hiremate-dsh", after_patch)
+        self.assertIn("other-plugin", after_patch)
+        after_toml = (rev_codex / "config.toml").read_text(encoding="utf-8")
+        self.assertIn("# 用户保留注释", after_toml)
+        self.assertNotIn("[marketplaces.hiremate]", after_toml)
+
+        # 4. MCP Server 同时支持 LSP Content-Length 帧，且 Shell HTML 将 bridgePatch 注入在 <head> 首位
+        import io
+        req_bytes = json.dumps({"jsonrpc": "2.0", "id": 99, "method": "ping", "params": {}}).encode("utf-8")
+        lsp_stream = io.BytesIO(f"Content-Length: {len(req_bytes)}\r\n\r\n".encode("ascii") + req_bytes)
+        frame_body, frame_mode = hm_mcp._read_next_rpc_frame(lsp_stream)
+        self.assertEqual(frame_mode, "lsp")
+        self.assertEqual(json.loads(frame_body.decode("utf-8"))["id"], 99)
+        shell_html = hm_mcp._build_shell_html()
+        self.assertIn('rawHtml.indexOf("<head>")', shell_html)
 
 
 if __name__ == "__main__":
