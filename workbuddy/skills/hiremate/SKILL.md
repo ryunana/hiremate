@@ -115,8 +115,8 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - 微信 / 支付宝扫码支付后 3 秒内永久绑定至当前注册账户，支付完成后运行 `auth status`（或 `auth login`）即可触发上方第 2 步的 Pro 权益激活引导。
 
 ### 3. BOSS 单轮搜岗深筛与三维防撞车（免费版与 Pro 通用）
-1. 运行 `config show` 获取目标岗位词、优先城市、屏蔽企业与当前档位（若返回 `onboarding_completed: false`，先转入「场景 1」引导建档，切勿空配置盲搜）。
-2. 在复用的已登录浏览器空间访问 `https://www.zhipin.com/web/geek/job`，核对右上角登录本人姓名无误后，按目标岗位词与城市筛选。
+1. 运行 `config show` 获取目标岗位词、优先城市、屏蔽企业与当前档位（若返回 `onboarding_completed: false`，先转入「场景 1」引导建档，切勿空配置盲搜）；**若返回 `execution_rules_ready: true`，本轮筛岗、遍历偏好与跟进细节同步遵守 `execution_rules_text`（优先级低于风控红线与代码层门控）**。
+2. 在复用的已登录浏览器空间访问 `https://www.zhipin.com/web/geek/job`，核对右上角登录本人姓名无误后，按**通用多源遍历与二次刷新顺序**逐级筛岗（若用户在 `execution-rules.md` 另有顺序则按用户指定）：推荐流前两页 → **刷新推荐流再看前两页** → 依次切换各个求职期望 Tab（各看前两页并刷新复看） → 按目标关键词与优先城市轮换搜索。
 3. **搜索列表遍历与详情核验防坑规约**：
    - 在双栏搜索页逐个点击左侧岗位卡片刷新右侧详情面板（若需查看公司完整工商与简介，在新标签或弹层打开公司主页查看后切回列表页，**切勿直接覆盖当前搜索列表 URL 导致翻页进度丢失**）；
    - **第一步：网页按钮与本地三维查重**：
@@ -125,7 +125,7 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
        ```bash
        python3 "<SKILL_DIR>/hiremate.py" ledger check-dup --company "<公司>" --title "<岗位>" --recruiter "<招聘者姓名>"
        ```
-       若 `duplicate: true`（命中前东家/黑名单、同公司换 HR 重发相似岗、同公司已有活跃在聊会话、或同公司此前已被判定为外包跳过），直接跳过；若同大厂此前仅跳过其他不相关方向岗位，`duplicate` 为 `false`，可正常独立评估当前新岗。
+       若 `duplicate: true`（命中前东家/黑名单、对方明确拒绝 `closed_rejected` 永久跳过、同公司换 HR 重发相似岗、同公司已有活跃在聊或 7 天内刚投过、或同公司此前已被判定为外包跳过），直接跳过；若返回 `allow_followup: true`（此前投递超过 7 天且对方未回复），默认允许礼貌二次跟进（同岗位每天最多跟进一次）；若同大厂此前仅跳过其他不相关方向岗位，`duplicate` 为 `false`，可正常独立评估当前新岗。
    - **第二步：展开完整 JD + 四源工作地点交叉核验 + 穿透公司简介排雷评估**：
      - **【长 JD 完整展开核验】**：在 BOSS 双栏列表页查看右侧职位详情时，长 JD 常会被折叠收起或超出首屏可视区——抓取前**必须先确认右侧 JD 无「展开 / 展开全部 / 查看全部 / 查看更多」收起按钮（若有必须先点击展开），并向下滚动右侧详情容器直至见到「工作地址 / 地图 / 公司介绍」模块**，确认拿到**完整 JD 全文**后再做评估（严禁只看折叠摘要或首屏半截 JD，以免漏掉文末的真实 base 地、外派驻场或核心硬门槛）；
      - **【四源工作地点交叉核验】**：打招呼前必须**同时核验「岗位标题 + 完整 JD 正文 + 面板地点标签 + 底部工作地址」四处地点**——若岗位标题或 JD 中显式写了 `base地 / 工作地 / 常驻 / 派驻 / 外派` 指向非优先城市，或与地点标签/工作地址自相矛盾（例如标签写深圳但标题写 `base长沙`），**一律以标题/JD 实际标注为准，非异地大厂弹性直接跳过，严禁仅凭地点标签放行**；
@@ -138,6 +138,38 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - **半自动审阅档（`mode_discover=semi`）**：将通过深筛的候选以 `status="discovered"` 存入 `ledger upsert-job`，在对话输出精简审阅单（序号、岗位+薪资、公司规模与自研性质、招聘者姓名及职务头衔、核心匹配点、潜在缺口、拟发 1–2 句第一人称破冰短句）。用户回复序号后，回到浏览器点击对应岗位的「立即沟通」并发送破冰短句，确认消息出现在会话框后执行 `ledger transition --job-id <id> --status opening_sent`。
    - **仅自动收藏档（`mode_discover=favorite`，免费版单轮与 Pro 通用）**：对通过深筛的候选，在有头浏览器点击右侧详情页的**「感兴趣」收藏按钮**（确认按钮变为「取消感兴趣/已感兴趣」），**绝对禁止点击「立即沟通」发送任何消息**！立即以 `status="favorited"`（保留拟好的 `icebreaker` 供本人后续投递参考）存入 `ledger upsert-job`，每轮默认收藏满配额（默认 5 个）即停手汇报；后续用户看完觉得合适，既可自己在 BOSS「感兴趣」列表点沟通，也可在对话回复序号由你代点「立即沟通」并流转为 `opening_sent`。
    - **Pro 全自动定额档（`mode_discover=auto`）**：**开跑前必须先调用一次 `pro patrol-gate` 核验 `discover_due` 与当日剩余配额**（若处于夜间宵禁、90 分钟冷却期内或已满 `max_per_day=20` 上限，严禁强行自动打招呼，降级输出 `semi` 候选审阅单）；确认放行后，对 `strong_match` 岗位直接点击「立即沟通」发送 1–2 句得体破冰短句，每成功送达 1 个立即记账 `opening_sent`；**一旦确认送达满本轮配额（默认 5 个）立即停手**，并执行 `pro mark-discovered` 记录找岗冷却时间戳。
+
+### 3-5. 收藏批次延迟/手动统一投递（`favorite-batch`）
+
+当用户要求「非工作时间只收藏不发消息，工作日到点再统一投」或「先攒一批收藏再由我确认串行投递」时，**严禁仅靠提示词记住“不要提前投”**，必须使用本地 SQLite 批次状态机 `hiremate.py favorite-batch`（代码层强校验 `apply_at`、`08:30–21:30` 安全宵禁、30–90 秒防风控串行抖动间隔、10 分钟并发租约与每日总外发安全硬顶）：
+
+```bash
+# 1) 建批次：传 --apply-at（须带时区）为定时批次；省略则为手动立即批次
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch create --apply-at "2026-11-27T09:30:00+08:00" --note "本周收藏批次"
+
+# 2) 收藏阶段：点「感兴趣」并先用 ledger upsert-job 落库 favorited 拿到 job_id，再加入批次
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch add --batch-id <ID> --item-json '{"job_id":"<job_id>"}'
+
+# 3) 检查到点批次与预算（Pro 定时巡检以 pro patrol-gate 为唯一总门控；手动/离线可用 check-due）
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch check-due
+
+# 4) 到点后逐条串行投递：先 claim-next 拿到 item_id，送达破冰后立即 mark（同事务同步账本）
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch claim-next --batch-id <ID>
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch mark --batch-id <ID> --item-id <item_id> --outcome applied
+
+# 5) 岗位下线/已投过/已被拒 -> 跳过
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch mark --batch-id <ID> --item-id <item_id> --outcome skipped --reason "岗位已下线"
+
+# 6) 遇验证码/登录失效 -> pause 保留断点；人工处理完用 resume 续投；彻底放弃用 cancel
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch pause --batch-id <ID> --reason "触发滑块验证，交本人处理"
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch resume --batch-id <ID>
+```
+
+**必须遵守的边界**：
+- **自动账本联动**：`favorite-batch mark --outcome applied` 会在同一事务里将对应账本 `job_id` 推进为 `opening_sent` 并标记 `channel=favorite_queue`（不扣减常规筛选投递额度；`inbound` 被动来信同样不扣常规额度），无需再手动补跑 `ledger transition`。
+- **防风控硬底线**：若 `claim-next` 返回 `BATCH_NOT_DUE`、`BATCH_CURFEW`（宵禁）、`BATCH_THROTTLED`（间隔未满，按 `retry_after_seconds` 等待）或 `carry_over > 0`（达到每日总外发安全硬顶自动顺延次日），一律立即停手尊重代码层门控，绝不绕过。
+- **Pro 巡检唯一入口**：Pro 自动巡检仍先跑 `pro patrol-gate`（返回值已包含 `favorite_batch_due` 与 `favorite_batch_budget`），放行后优先串行处理到点批次，再按 `discover_due` 处理常规找岗。
+
    - **【搜岗收尾必推可视化看板】**：每轮搜岗结束汇报时，必须在回复末尾附上独立的 **`📊 可视化求职看板已实时同步`** 提示块（点明本轮评估与拦截的外包/前东家明细已记入 6 维漏斗台账，附上可点击 `file://` 链接与 `/hiremate-dashboard` 快捷命令；若为用户首轮产生真实岗位入库，顺手跑一次 `build-dashboard --open` 自动弹开有真实数据的看板！）。
 
 ### 4. 开启工作时间自动巡检（挂载宿主原生定时任务 · Pro 专属）

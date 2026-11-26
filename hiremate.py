@@ -37,7 +37,18 @@ OPEN_ROOT = Path(__file__).resolve().parent
 if str(OPEN_ROOT) not in sys.path:
     sys.path.insert(0, str(OPEN_ROOT))
 
-from hiremate_lib import __version__, client, dashboard, ledger, mcp_server, updater, voice, workspace  # noqa: E402
+from hiremate_lib import (  # noqa: E402
+    __version__,
+    channel,
+    client,
+    dashboard,
+    favorite_batch,
+    ledger,
+    mcp_server,
+    updater,
+    voice,
+    workspace,
+)
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -298,6 +309,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="驻场/外派细粒度策略：block_all / inbound_only / allow_all",
     )
     p_cfg_set.add_argument(
+        "--rules-file",
+        help="挂载本机自定义执行规则 Markdown 文件路径（默认自动探测工作区 execution-rules.md；传 clear 清除绑定）",
+    )
+    p_cfg_set.add_argument(
         "--execution-mode",
         choices=workspace.VALID_EXECUTION_MODES,
         help="切换运行模式：browser（浏览器直连）或 copilot（无浏览器权限粘贴副驾驶）",
@@ -476,6 +491,67 @@ def build_parser() -> argparse.ArgumentParser:
     pro_sub.add_parser("mark-idle", help="释放主执行锁")
     pro_sub.add_parser("mark-discovered", help="记录刚刚完成一轮主动找岗的时间戳")
 
+    # 6b. favorite-batch：收藏批次延迟/手动统一投递状态机（SQLite 同库同事务，Free/Pro 共用底座）
+    p_fb = sub.add_parser(
+        "favorite-batch",
+        help="收藏批次管理：支持手动立即批次或到 apply_at 后串行统一投递（代码层硬校验与防风控底线）",
+    )
+    fb_sub = p_fb.add_subparsers(dest="fb_cmd", required=True)
+
+    p_fb_new = fb_sub.add_parser("create", help="创建收藏批次（省略 --apply-at 为手动立即批次；传入则到点前拒绝投递）")
+    p_fb_new.add_argument("--apply-at", default="", help="可选：允许统一投递的时间（ISO-8601，须带时区）")
+    p_fb_new.add_argument("--batch-id", default="", help="自定义批次 ID（默认自动生成）")
+    p_fb_new.add_argument("--note", default="", help="备注：批次来源与意图")
+    p_fb_new.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_add = fb_sub.add_parser("add", help="向批次追加已入账本的收藏岗位（强制绑定 job_id）")
+    p_fb_add.add_argument("--batch-id", required=True)
+    p_fb_add.add_argument("--item-json", required=True, help="岗位 JSON 字符串或 @文件路径（须含 job_id）")
+    p_fb_add.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_due = fb_sub.add_parser("check-due", help="只读检查已到点批次、暂停批次与当日分桶安全预算")
+    p_fb_due.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_claim = fb_sub.add_parser("claim-next", help="原子认领下一待投递项（带 10 分钟租约、宵禁、抖动间隔与每日硬顶校验）")
+    p_fb_claim.add_argument("--batch-id", required=True)
+    p_fb_claim.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_mark = fb_sub.add_parser("mark", help="标记批次条目结果（applied 自动同事务同步账本为 opening_sent + favorite_queue）")
+    p_fb_mark.add_argument("--batch-id", required=True)
+    p_fb_mark.add_argument("--item-id", default="", help="claim-next 返回的条目 item_id（推荐）")
+    p_fb_mark.add_argument("--job-id", default="", help="可选：按账本 job_id 定位待处理条目")
+    p_fb_mark.add_argument(
+        "--outcome",
+        choices=["applied", "skipped"],
+        default="applied",
+        help="applied=已送达开场并同步账本；skipped=岗位下线/已投过/已拒跳过",
+    )
+    p_fb_mark.add_argument("--reason", default="", help="跳过原因")
+    p_fb_mark.add_argument("--note", default="", help="写入账本的补充备注")
+    p_fb_mark.add_argument("--resume-used", default="", help="可选：使用的简历名称")
+    p_fb_mark.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_pause = fb_sub.add_parser("pause", help="因验证码/登录失效暂停批次并保留断点（后续可用 resume 续投）")
+    p_fb_pause.add_argument("--batch-id", required=True)
+    p_fb_pause.add_argument("--reason", default="")
+    p_fb_pause.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_resume = fb_sub.add_parser("resume", help="恢复已暂停的批次继续投递（可选顺延 --apply-at）")
+    p_fb_resume.add_argument("--batch-id", required=True)
+    p_fb_resume.add_argument("--apply-at", default="", help="可选：重新设定允许投递的时间（ISO-8601，须带时区）")
+    p_fb_resume.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_cancel = fb_sub.add_parser("cancel", help="彻底取消批次（进入终态 cancelled，不可恢复）")
+    p_fb_cancel.add_argument("--batch-id", required=True)
+    p_fb_cancel.add_argument("--reason", default="")
+    p_fb_cancel.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_show = fb_sub.add_parser("show", help="查看全部批次进度与当日配额分桶")
+    p_fb_show.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_list = fb_sub.add_parser("list", help="列出已到点、仍待投递的批次")
+    p_fb_list.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
     # 7. build-dashboard
     p_dash = sub.add_parser("build-dashboard", help="构建本地高信息密度只读静态求职看板 HTML")
     p_dash.add_argument("--out", help="输出 HTML 文件路径（默认 <workspace>/dashboard.html）")
@@ -599,6 +675,10 @@ def main(argv: list[str] | None = None) -> int:
                 ego_installed=e_inst,
             )
             chk_payload["version"] = __version__
+            rules_info = workspace.inspect_execution_rules(ws, cfg)
+            chk_payload["execution_rules_ready"] = rules_info["ready"]
+            chk_payload["execution_rules_file"] = rules_info["path"]
+            chk_payload["execution_rules_sha256"] = rules_info["sha256"]
             _emit(updater.attach_passive_update_notice(chk_payload, home))
             return 0
 
@@ -609,6 +689,7 @@ def main(argv: list[str] | None = None) -> int:
                 tier, _creds = _resolve_live_tier_and_creds(ws, home, args.api_base)
                 v_stat = voice.inspect_voice_status(ws)
                 v_text = voice.read_voice_profile(ws) or ""
+                rules_info = workspace.inspect_execution_rules(ws, cfg)
                 show_payload: dict[str, Any] = {
                     "ok": True,
                     "version": __version__,
@@ -632,6 +713,10 @@ def main(argv: list[str] | None = None) -> int:
                     "voice_profile_file": v_stat["path"],
                     "voice_status": v_stat,
                     "voice_profile_text": v_text[:2500] if v_text else "",
+                    "execution_rules_ready": rules_info["ready"],
+                    "execution_rules_file": rules_info["path"],
+                    "execution_rules_sha256": rules_info["sha256"],
+                    "execution_rules_text": rules_info["text"],
                     "config": cfg,
                     "strategy_confirmation": workspace.build_strategy_confirmation_summary(cfg, tier=tier),
                 }
@@ -686,6 +771,9 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["filter_onsite"] = args.filter_onsite == "true"
                 if args.onsite_policy:
                     cli_patch["onsite_policy"] = args.onsite_policy
+                if args.rules_file is not None:
+                    rf_val = args.rules_file.strip()
+                    cli_patch["execution_rules_file"] = "" if rf_val.lower() in ("", "clear", "none") else rf_val
                 if args.execution_mode:
                     cli_patch["execution_mode"] = args.execution_mode
                 if args.browser_provider:
@@ -1060,6 +1148,83 @@ def main(argv: list[str] | None = None) -> int:
                 st = workspace.update_runtime_flag(ws, "mark-discovered")
                 _emit({"ok": True, "runtime_state": st["runtime_state"]})
                 return 0
+
+        if args.cmd == "favorite-batch":
+            raw_now = getattr(args, "now", None)
+            try:
+                now_override = favorite_batch.parse_iso(raw_now) if raw_now else None
+                if args.fb_cmd == "create":
+                    batch = favorite_batch.create_batch(
+                        ws,
+                        apply_at=args.apply_at or None,
+                        batch_id=args.batch_id,
+                        note=args.note,
+                        now=now_override,
+                    )
+                    _emit({"ok": True, "batch": batch})
+                    return 0
+                if args.fb_cmd == "add":
+                    item = _load_json_arg(args.item_json)
+                    res = favorite_batch.add_item(ws, args.batch_id, item, now=now_override)
+                    _emit({"ok": True, **res})
+                    return 0
+                if args.fb_cmd == "check-due":
+                    res = favorite_batch.check_due(ws, now=now_override)
+                    _emit(updater.attach_passive_update_notice(res, home))
+                    return 0
+                if args.fb_cmd == "claim-next":
+                    res = favorite_batch.claim_next(ws, args.batch_id, now=now_override)
+                    _emit(res)
+                    return 0
+                if args.fb_cmd == "mark":
+                    res = favorite_batch.mark_item(
+                        ws,
+                        args.batch_id,
+                        item_id=args.item_id,
+                        job_id=args.job_id,
+                        outcome=args.outcome,
+                        reason=args.reason,
+                        note=args.note,
+                        resume_used=args.resume_used,
+                        now=now_override,
+                    )
+                    _emit(res)
+                    return 0
+                if args.fb_cmd == "pause":
+                    batch = favorite_batch.pause_batch(
+                        ws, args.batch_id, reason=args.reason, now=now_override
+                    )
+                    _emit({"ok": True, "batch": batch})
+                    return 0
+                if args.fb_cmd == "resume":
+                    batch = favorite_batch.resume_batch(
+                        ws,
+                        args.batch_id,
+                        apply_at=args.apply_at or None,
+                        now=now_override,
+                    )
+                    _emit({"ok": True, "batch": batch})
+                    return 0
+                if args.fb_cmd == "cancel":
+                    batch = favorite_batch.cancel_batch(
+                        ws, args.batch_id, reason=args.reason, now=now_override
+                    )
+                    _emit({"ok": True, "batch": batch})
+                    return 0
+                if args.fb_cmd == "show":
+                    _emit(
+                        updater.attach_passive_update_notice(
+                            {"ok": True, **favorite_batch.snapshot_for_diagnostics(ws, now=now_override)},
+                            home,
+                        )
+                    )
+                    return 0
+                if args.fb_cmd == "list":
+                    _emit({"ok": True, "due_batches": favorite_batch.due_batches(ws, now=now_override)})
+                    return 0
+            except favorite_batch.BatchGateError as exc:
+                _emit(exc.as_dict())
+                return 1
 
         if args.cmd == "build-dashboard":
             out = Path(args.out).expanduser().resolve() if args.out else None

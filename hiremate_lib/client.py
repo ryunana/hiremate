@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import favorite_batch
 from .ledger import JobLedger
 from .normalize import deduplicate_company_list, employer_shield_match
 from .workspace import (
@@ -36,6 +37,7 @@ from .workspace import (
     load_config,
     load_runtime_state,
     now_iso,
+    save_runtime_state,
 )
 
 HTTP_TIMEOUT_SECONDS = 10.0
@@ -1000,12 +1002,24 @@ def pro_patrol_gate(
     summary = ledger.summary()
     sched = cfg.get("schedule") or {}
     mode_d = str(cfg.get("mode_discover") or "semi")
-    today_actions = int(
-        summary.get(
-            "today_outbound_actions",
-            int(summary.get("today_opening_sent", 0)) + int(summary.get("today_favorited", 0)),
+    # 上报云端的「今日已用投递额度」仅统计真正消耗主动找岗额度的渠道（outbound）。
+    if "today_counted_opening_sent" in summary:
+        today_actions = int(summary.get("today_counted_opening_sent") or 0)
+    else:  # 兼容旧账本对象
+        today_actions = int(
+            summary.get(
+                "today_outbound_actions",
+                int(summary.get("today_opening_sent", 0)) + int(summary.get("today_favorited", 0)),
+            )
         )
-    )
+
+    now_dt = None
+    if now_override:
+        try:
+            now_dt = favorite_batch.parse_iso(now_override)
+        except favorite_batch.BatchGateError:
+            now_dt = None
+    due_batches_list = favorite_batch.due_batches(workspace, now=now_dt)
 
     payload = {
         "now_iso": now_override or now_iso(),
@@ -1015,9 +1029,15 @@ def pro_patrol_gate(
             "max_deliver_per_round": int(sched.get("max_per_round", 5)),
             "max_deliver_per_day": int(sched.get("max_per_day", 20)),
             "discover_interval_minutes": int(sched.get("min_interval_minutes", 90)),
+            "auto_risk_acknowledged": bool(cfg.get("auto_risk_acknowledged", False)),
+            "favorite_daily_cap": int(sched.get("favorite_daily_cap", favorite_batch.DEFAULT_FAVORITE_DAILY_CAP)),
         },
         "runtime_state": {
             "delivered_today": today_actions,
+            "delivered_today_by_channel": summary.get("today_by_channel") or {},
+            "favorited_today": int(summary.get("today_favorited", 0)),
+            "due_favorite_batches_count": len(due_batches_list),
+            "due_favorite_items_pending": sum(int(b.get("pending", 0)) for b in due_batches_list),
             "main_busy": bool(rt.get("busy", False)),
             "main_busy_since": rt.get("busy_since"),
             "last_discover_at": rt.get("last_discover_at"),
@@ -1035,6 +1055,17 @@ def pro_patrol_gate(
         token=str(creds["token"]),
     )
     if status == 200 and data.get("ok"):
+        # 缓存云端下发的收藏批次预算（带时间戳 TTL），供本地 favorite-batch claim-next 取 min
+        cloud_budget = data.get("favorite_batch_budget")
+        if isinstance(cloud_budget, int):
+            rt["favorite_batch_budget"] = max(0, cloud_budget)
+            rt["favorite_batch_budget_updated_at"] = now_override or now_iso()
+            try:
+                save_runtime_state(workspace, rt)
+            except OSError:
+                pass
+        data["local_favorite_batches_due"] = due_batches_list
+        data["favorite_batch_due"] = bool(due_batches_list)
         data["mode_discover"] = mode_d
         is_due = bool(data.get("discover_due"))
         data["allow_background_discover"] = is_due and mode_d in ("auto", "favorite")

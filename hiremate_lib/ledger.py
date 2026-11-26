@@ -6,10 +6,17 @@ import csv
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .channel import (
+    CHANNEL_FAVORITE_QUEUE,
+    CHANNEL_OUTBOUND,
+    channel_label,
+    counts_toward_quota,
+    normalize_channel,
+)
 from .normalize import (
     _NEGATED_OUTSOURCING_RE,
     companies_match,
@@ -170,6 +177,44 @@ CREATE TABLE IF NOT EXISTS interview_rounds (
 
 CREATE INDEX IF NOT EXISTS idx_interview_rounds_job_id ON interview_rounds(job_id);
 CREATE INDEX IF NOT EXISTS idx_interview_rounds_outcome ON interview_rounds(outcome);
+
+CREATE TABLE IF NOT EXISTS favorite_batches (
+    batch_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applying', 'paused', 'completed', 'cancelled')),
+    channel TEXT NOT NULL DEFAULT 'favorite_queue',
+    apply_at TEXT,
+    note TEXT NOT NULL DEFAULT '',
+    pause_reason TEXT NOT NULL DEFAULT '',
+    last_dispatch_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    completed_at TEXT,
+    cancelled_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_favorite_batches_status ON favorite_batches(status);
+
+CREATE TABLE IF NOT EXISTS favorite_batch_items (
+    item_id TEXT PRIMARY KEY,
+    batch_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    company TEXT NOT NULL,
+    title TEXT NOT NULL,
+    salary TEXT NOT NULL DEFAULT '',
+    city TEXT NOT NULL DEFAULT '',
+    job_url TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'in_flight', 'applied', 'skipped')),
+    claimed_at TEXT,
+    applied_at TEXT,
+    skipped_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_favorite_batch_items_batch_id ON favorite_batch_items(batch_id);
+CREATE INDEX IF NOT EXISTS idx_favorite_batch_items_job_id ON favorite_batch_items(job_id);
+CREATE INDEX IF NOT EXISTS idx_favorite_batch_items_status ON favorite_batch_items(status);
 """
 
 
@@ -425,7 +470,7 @@ class JobLedger:
             row = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
             return _row_to_dict(row) if row else None
 
-    def upsert_job(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def upsert_job(self, payload: dict[str, Any], *, _allow_favorite_queue: bool = False) -> dict[str, Any]:
         company = str(payload.get("company") or "").strip()
         title = str(payload.get("title") or "").strip()
         if not company or not title:
@@ -446,6 +491,20 @@ class JobLedger:
             if existing and existing.get(key) is not None:
                 return str(existing[key])
             return default
+
+        raw_channel = normalize_channel(pick_str("channel", CHANNEL_OUTBOUND))
+        if raw_channel == CHANNEL_FAVORITE_QUEUE and not _allow_favorite_queue:
+            # 防止绕过 favorite-batch 批次状态机直接伪造 favorite_queue 逃避常规投递额度；
+            # 若已有记录本来就是 favorite_queue 则保留原值。
+            if existing and existing.get("channel") == CHANNEL_FAVORITE_QUEUE:
+                resolved_channel = CHANNEL_FAVORITE_QUEUE
+            else:
+                resolved_channel = normalize_channel(
+                    existing.get("channel") if existing else CHANNEL_OUTBOUND,
+                    default=CHANNEL_OUTBOUND,
+                )
+        else:
+            resolved_channel = raw_channel
 
         risk_tags_list = (
             _parse_risk_tags(payload["risk_tags"])
@@ -468,7 +527,7 @@ class JobLedger:
             "city": pick_str("city"),
             "recruiter_name": pick_str("recruiter_name"),
             "recruiter_title": pick_str("recruiter_title"),
-            "channel": pick_str("channel", "outbound"),
+            "channel": resolved_channel,
             "risk_tags": risk_tags_json,
             "match_reasons": pick_str("match_reasons"),
             "gaps": pick_str("gaps"),
@@ -971,10 +1030,33 @@ class JobLedger:
         already_favorited: bool = False,
         filter_outsourcing: bool = True,
         filter_onsite: bool = True,
+        no_reply_followup_days: int = 7,
+        now_iso_override: str | None = None,
     ) -> dict[str, Any]:
-        """三维查重：1. 归一化公司比对（含前东家黑名单） 2. 岗位名相似度 3. 网页已有会话/已收藏与同公司在聊/按当前偏好生效的公司级排雷记录。"""
+        """三维查重 + 重复投递分层判定：
+        1. 归一化公司比对（含前东家黑名单）
+        2. 岗位名相似度（明确拒绝/排雷永久跳过；投过超 N 天未回默认允许礼貌二次跟进）
+        3. 网页已有会话/已收藏与同公司在聊/公司级排雷记录。
+        """
         clean_c, core_c = normalize_company_parts(company)
         norm_t = normalize_title(title)
+
+        def _parse_dt_safe(raw: str | None) -> datetime | None:
+            text = str(raw or "").strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(text)
+            except ValueError:
+                return None
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        now_dt = _parse_dt_safe(now_iso_override) or datetime.now(timezone.utc)
+        followup_threshold = max(1, int(no_reply_followup_days))
 
         all_blocked = list(blocked_companies or []) + list(past_employers or [])
         for blk in all_blocked:
@@ -983,6 +1065,8 @@ class JobLedger:
                 return {
                     "ok": True,
                     "duplicate": True,
+                    "allow_followup": False,
+                    "reapply_policy": "blocked_employer",
                     "blocked_employer": is_former,
                     "blocked_company_hit": blk,
                     "normalized_company": core_c,
@@ -1003,6 +1087,8 @@ class JobLedger:
             return {
                 "ok": True,
                 "duplicate": True,
+                "allow_followup": False,
+                "reapply_policy": "chat_already_open",
                 "blocked_employer": False,
                 "blocked_company_hit": None,
                 "normalized_company": core_c,
@@ -1023,6 +1109,8 @@ class JobLedger:
             return {
                 "ok": True,
                 "duplicate": True,
+                "allow_followup": False,
+                "reapply_policy": "already_favorited",
                 "blocked_employer": False,
                 "blocked_company_hit": None,
                 "normalized_company": core_c,
@@ -1051,7 +1139,9 @@ class JobLedger:
         same_company_skipped = False
         company_level_skipped = False
         exact_or_similar_role = False
+        rejected_similar_role = False
         recruiter_changed_repost = False
+        stale_unreplied_days: int | None = None
 
         # 仅将企业主体层面的黑名单/外包派遣属性作为公司级连坐跳过依据；驻场属单岗位属性（如自研公司或外包公司同时招驻场岗与本部岗），不连坐封杀整家公司其他岗位
         company_block_hints: list[str] = ["黑名单"]
@@ -1064,7 +1154,18 @@ class JobLedger:
             sim = title_similarity(title, row["title"])
             max_sim = max(max_sim, sim)
             st = row["status"]
-            if st in ACTIVE_CHAT_STATUSES:
+
+            # 判定是否为「投过但多天未回」的单向 opening_sent：默认允许礼貌二次跟进，不再一刀切拦截
+            is_stale_unreplied = False
+            days_elapsed: int | None = None
+            if st == "opening_sent":
+                op_dt = _parse_dt_safe(row["opening_sent_at"]) or _parse_dt_safe(row["updated_at"])
+                if op_dt is not None:
+                    days_elapsed = int((now_dt - op_dt).total_seconds() // 86400)
+                    if days_elapsed >= followup_threshold:
+                        is_stale_unreplied = True
+
+            if st in ACTIVE_CHAT_STATUSES and not is_stale_unreplied:
                 same_company_active = True
             if st == "favorited":
                 same_company_favorited = True
@@ -1074,13 +1175,24 @@ class JobLedger:
                 sanitized_meta = _NEGATED_OUTSOURCING_RE.sub(" ", raw_meta)
                 if any(hint in sanitized_meta for hint in company_block_hints):
                     company_level_skipped = True
+
             sim_threshold = 0.68 if st == "screened_skip" else 0.55
             if sim >= sim_threshold:
-                exact_or_similar_role = True
-                if st == "favorited":
-                    favorited_similar_role = True
-                if recruiter and row["recruiter_name"] and recruiter.strip() != row["recruiter_name"].strip():
-                    recruiter_changed_repost = True
+                if is_stale_unreplied:
+                    if days_elapsed is not None:
+                        stale_unreplied_days = (
+                            days_elapsed
+                            if stale_unreplied_days is None
+                            else max(stale_unreplied_days, days_elapsed)
+                        )
+                else:
+                    exact_or_similar_role = True
+                    if st == "closed_rejected":
+                        rejected_similar_role = True
+                    if st == "favorited":
+                        favorited_similar_role = True
+                    if recruiter and row["recruiter_name"] and recruiter.strip() != row["recruiter_name"].strip():
+                        recruiter_changed_repost = True
 
             same_company_matches.append({
                 "job_id": row["job_id"],
@@ -1091,14 +1203,20 @@ class JobLedger:
                 "recruiter_name": row["recruiter_name"],
                 "recruiter_title": row["recruiter_title"],
                 "title_similarity": sim,
+                "days_since_opening": days_elapsed,
+                "stale_unreplied_followup_eligible": is_stale_unreplied,
                 "updated_at": row["updated_at"],
                 "note": row["note"],
             })
 
         is_dup = bool(exact_or_similar_role or same_company_active or company_level_skipped)
+        allow_followup = bool((not is_dup) and (stale_unreplied_days is not None))
+
         reasons: list[str] = []
         if recruiter_changed_repost:
             reasons.append("检测到同公司换招聘者重发相似岗位（防连投社死拦截）")
+        elif rejected_similar_role:
+            reasons.append(f"同公司相似岗位此前已被明确拒绝/未通过（相似度 {max_sim:.2f}），永久跳过不再复投")
         elif favorited_similar_role:
             reasons.append(f"同公司相同或高度相似岗位已在收藏待投递列表中（相似度 {max_sim:.2f}）")
         elif exact_or_similar_role:
@@ -1110,9 +1228,29 @@ class JobLedger:
         elif same_company_skipped and not is_dup:
             warnings.append("同公司曾跳过其他不同方向的岗位，当前新岗位可独立评估")
 
+        if allow_followup:
+            reapply_policy = "allow_followup_after_no_reply"
+            followup_msg = (
+                f"该岗位已投递 {stale_unreplied_days} 天且对方未回复（≥{followup_threshold}天），"
+                "默认允许礼貌二次跟进（同岗位每天最多跟进一次）"
+            )
+            reasons.append(followup_msg)
+            warnings.append(followup_msg)
+        elif not is_dup:
+            reapply_policy = "new_candidate"
+        elif rejected_similar_role or company_level_skipped:
+            reapply_policy = "permanent_skip_rejected"
+        elif same_company_active:
+            reapply_policy = "active_or_recent_opening_skip"
+        else:
+            reapply_policy = "duplicate_skip"
+
         return {
             "ok": True,
             "duplicate": is_dup,
+            "allow_followup": allow_followup,
+            "reapply_policy": reapply_policy,
+            "days_since_opening": stale_unreplied_days,
             "blocked_employer": False,
             "blocked_company_hit": None,
             "normalized_company": core_c,
@@ -1182,6 +1320,19 @@ class JobLedger:
         today_opening_sent = 0
         today_outbound_actions = 0
 
+        # 按来源渠道分桶统计当日动作，供额度分桶与云端/本地安全护栏使用（见 hiremate_lib/channel.py）。
+        today_by_channel: dict[str, dict[str, int]] = {}
+
+        def _bucket(ch: str) -> dict[str, int]:
+            key = normalize_channel(ch)
+            if key not in today_by_channel:
+                today_by_channel[key] = {
+                    "favorited": 0,
+                    "opening_sent": 0,
+                    "counted_opening_sent": 0,
+                }
+            return today_by_channel[key]
+
         jobs_with_rounds = {str(r["job_id"]) for r in round_rows}
         upcoming_interviews_count = sum(1 for r in round_rows if r["outcome"] == "pending")
 
@@ -1189,14 +1340,20 @@ class JobLedger:
             st = row["status"]
             by_status[st] = by_status.get(st, 0) + 1
 
+            row_channel = normalize_channel(row["channel"])
             fav_ts = row["favorited_at"] or ""
             op_ts = row["opening_sent_at"] or ""
             if st == "favorited" or bool(fav_ts):
                 favorited_total += 1
             if fav_ts.startswith(today_prefix):
                 today_favorited += 1
+                _bucket(row_channel)["favorited"] += 1
             if op_ts.startswith(today_prefix):
                 today_opening_sent += 1
+                bucket = _bucket(row_channel)
+                bucket["opening_sent"] += 1
+                if counts_toward_quota(row_channel):
+                    bucket["counted_opening_sent"] += 1
             if fav_ts.startswith(today_prefix) or op_ts.startswith(today_prefix):
                 today_outbound_actions += 1
 
@@ -1264,6 +1421,15 @@ class JobLedger:
             "today_favorited": today_favorited,
             "today_opening_sent": today_opening_sent,
             "today_outbound_actions": today_outbound_actions,
+            # 额度分桶：只有 counts_toward_quota() 为真（outbound）的渠道才计入每日主动投递额度。
+            # 保留 today_outbound_actions 原值以兼容既有看板与外部脚本。
+            "today_by_channel": today_by_channel,
+            "today_counted_opening_sent": sum(
+                b["counted_opening_sent"] for b in today_by_channel.values()
+            ),
+            "quota_exempt_channels": sorted(
+                ch for ch in today_by_channel if not counts_toward_quota(ch)
+            ),
         }
 
     def _export_rows_and_headers(self) -> tuple[list[str], list[list[object]]]:
@@ -1314,7 +1480,7 @@ class JobLedger:
                 item["city"],
                 item["recruiter_name"],
                 item["recruiter_title"],
-                item["channel"],
+                channel_label(item["channel"]),
                 " / ".join(item["risk_tags"]),
                 item["match_reasons"],
                 item["gaps"],

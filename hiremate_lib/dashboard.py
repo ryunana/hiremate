@@ -947,7 +947,8 @@ def _render_job_card(job: dict[str, Any], *, highlight_icebreaker: bool = False)
 
     risk_tags = job.get("risk_tags") or []
     channel = str(job.get("channel") or "outbound")
-    channel_text = "被动来信" if "inbound" in channel else "主动检索"
+    from .channel import channel_label as _channel_label
+    channel_text = _channel_label(channel)
 
     is_skipped = status == "screened_skip"
     tags_html_parts = [f'<span class="tag tag-channel">{_esc(channel_text)}</span>']

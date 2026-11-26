@@ -73,6 +73,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     ],
     "inbound_resume_policy": "generous",
     "reply_style": "concise_natural",
+    "execution_rules_file": "",
     "schedule": {
         "weekdays_only": True,
         "active_windows": ["09:00-12:00", "14:00-18:00"],
@@ -347,6 +348,7 @@ def validate_and_normalize_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
     cfg["min_salary_k"] = max(0, int(cfg.get("min_salary_k", 20)))
     cfg["remote_bigtech_flex"] = bool(cfg.get("remote_bigtech_flex", True))
     cfg["auto_risk_acknowledged"] = bool(cfg.get("auto_risk_acknowledged", False))
+    cfg["execution_rules_file"] = str(cfg.get("execution_rules_file") or "").strip()
 
     cfg["target_roles"] = deduplicate_company_list(cfg.get("target_roles") or [])
     cfg["preferred_cities"] = deduplicate_company_list(cfg.get("preferred_cities") or [])
@@ -2161,3 +2163,42 @@ def update_runtime_flag(
         raise ValueError(f"未知运行态动作: {action}")
     saved = save_runtime_state(workspace, state)
     return {"ok": True, "action": canonical_action, "runtime_state": saved}
+
+
+def inspect_execution_rules(
+    workspace: Path,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """探测并读取用户自定义执行规则文件（config.execution_rules_file 或工作区默认 execution-rules.md）。"""
+    import hashlib
+
+    config = cfg if cfg is not None else load_config(workspace)
+    configured_raw = str(config.get("execution_rules_file") or "").strip()
+    if configured_raw:
+        candidate = Path(configured_raw).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (workspace / candidate).resolve()
+    else:
+        resolved = (workspace / "execution-rules.md").resolve()
+
+    if resolved.is_file():
+        try:
+            raw_bytes = resolved.read_bytes()
+            text = raw_bytes.decode("utf-8", errors="replace").strip()
+            return {
+                "ready": bool(text),
+                "path": str(resolved),
+                "configured": bool(configured_raw),
+                "sha256": hashlib.sha256(raw_bytes).hexdigest()[:12],
+                "chars": len(text),
+                "text": text[:6000],
+            }
+        except OSError:
+            pass
+    return {
+        "ready": False,
+        "path": str(resolved),
+        "configured": bool(configured_raw),
+        "sha256": "",
+        "chars": 0,
+        "text": "",
+    }
