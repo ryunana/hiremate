@@ -138,6 +138,39 @@ python3 "<SKILL_DIR>/hiremate.py" auth status
    - **半自动审阅档（`mode_discover=semi`）**：将通过深筛的候选以 `status="discovered"` 存入 `ledger upsert-job`，在对话输出精简审阅单（序号、岗位+薪资、公司规模与自研性质、招聘者姓名及职务头衔、核心匹配点、潜在缺口、拟发 1–2 句第一人称破冰短句）。用户回复序号后，回到浏览器点击对应岗位的「立即沟通」并发送破冰短句，确认消息出现在会话框后执行 `ledger transition --job-id <id> --status opening_sent`。
    - **仅自动收藏档（`mode_discover=favorite`，免费版单轮与 Pro 通用）**：对通过深筛的候选，在有头浏览器点击右侧详情页的**「感兴趣」收藏按钮**（确认按钮变为「取消感兴趣/已感兴趣」），**绝对禁止点击「立即沟通」发送任何消息**！立即以 `status="favorited"`（保留拟好的 `icebreaker` 供本人后续投递参考）存入 `ledger upsert-job`，每轮默认收藏满配额（默认 5 个）即停手汇报；后续用户看完觉得合适，既可自己在 BOSS「感兴趣」列表点沟通，也可在对话回复序号由你代点「立即沟通」并流转为 `opening_sent`。
    - **Pro 全自动定额档（`mode_discover=auto`）**：**开跑前必须先调用一次 `pro patrol-gate` 核验 `discover_due` 与当日剩余配额**（若处于夜间宵禁、90 分钟冷却期内或已满 `max_per_day=20` 上限，严禁强行自动打招呼，降级输出 `semi` 候选审阅单）；确认放行后，对 `strong_match` 岗位直接点击「立即沟通」发送 1–2 句得体破冰短句，每成功送达 1 个立即记账 `opening_sent`；**一旦确认送达满本轮配额（默认 5 个）立即停手**，并执行 `pro mark-discovered` 记录找岗冷却时间戳。
+
+### 4-0. 非工作时间只收藏、工作时间到点统一投递（`favorite-batch`）
+
+用户常要求「晚上/周末只点收藏，别发消息；工作日到某个点再统一投这批」。**严禁用提示词里的“记得不要提前投”来保证这条约束**——必须使用本地批次状态机 `hiremate.py favorite-batch`，它在**代码层**拒绝 `apply_at` 之前的任何投递动作：
+
+```bash
+# 1) 建批次：apply_at 是允许开始统一投递的时间点（必须带时区）
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch create --apply-at "2026-11-27T09:30:00+08:00" --note "本周收藏批次"
+
+# 2) 收藏阶段：每个候选只点「感兴趣」，记 favorited，并加入批次
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch add --batch-id <ID> \
+  --item-json '{"company":"<公司>","title":"<岗位>","salary":"<薪资>","job_url":"<链接>","reason":"<匹配点>"}'
+
+# 3) 每轮巡检先问门控该做什么（纯离线、免 Pro）
+python3 "<SKILL_DIR>/hiremate.py" gate
+
+# 4) 到点后逐条串行投递：先 claim-next 取一个，投完立刻 mark
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch claim-next --batch-id <ID>
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch mark --batch-id <ID> --company "<公司>" --title "<岗位>" --outcome applied
+
+# 5) 岗位下线/已投过/已被拒 -> 跳过并移除
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch mark --batch-id <ID> --company "<公司>" --title "<岗位>" --outcome skipped --reason "岗位已下线"
+
+# 6) 遇验证码/登录失效 -> 中止并保留断点，下次续投不重复
+python3 "<SKILL_DIR>/hiremate.py" favorite-batch abort --batch-id <ID> --reason "触发滑块验证，交本人处理"
+```
+
+**必须遵守的边界**：
+
+- **记账时 `channel` 必须写 `favorite_queue`**：该渠道不占当日筛选投递额度、不影响常规找岗与 90 分钟冷却（`ledger summary` 的 `today_by_channel` 可核对）。漏写会把这批岗位算进当日额度，导致同一天被重复计费。
+- `gate` 返回 `favorite_batch_due: true` 表示有批次到点，`may_favorite_batch: true` 才可投；**优先于常规找岗执行**，但必须逐条串行、送达一个再下一个（批次经用户批准可突破单轮 5 个上限）。
+- 批次不受工作时间窗限制（周末到点同样可投），但**未到 `apply_at` 时 `claim-next` 会直接报 `BATCH_NOT_DUE`**——不要在提示词里另写一套“是否到点”的自查逻辑。
+- 投递前仍须逐条过 `pro evaluate-job`（Pro）；破冰只发 1–2 句与该岗位相关的经历，不索要 JD、不盘问直签、不提简历版本。
    - **【搜岗收尾必推可视化看板】**：每轮搜岗结束汇报时，必须在回复末尾附上独立的 **`📊 可视化求职看板已实时同步`** 提示块（点明本轮评估与拦截的外包/前东家明细已记入 6 维漏斗台账，附上可点击 `file://` 链接与 `/hiremate-dashboard` 快捷命令；若为用户首轮产生真实岗位入库，顺手跑一次 `build-dashboard --open` 自动弹开有真实数据的看板！）。
 
 ### 4. 开启工作时间自动巡检（挂载宿主原生定时任务 · Pro 专属）

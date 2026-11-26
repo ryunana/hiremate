@@ -37,7 +37,7 @@ OPEN_ROOT = Path(__file__).resolve().parent
 if str(OPEN_ROOT) not in sys.path:
     sys.path.insert(0, str(OPEN_ROOT))
 
-from hiremate_lib import __version__, client, dashboard, ledger, mcp_server, updater, voice, workspace  # noqa: E402
+from hiremate_lib import __version__, channel, client, dashboard, gate, ledger, mcp_server, updater, voice, workspace  # noqa: E402
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -476,7 +476,62 @@ def build_parser() -> argparse.ArgumentParser:
     pro_sub.add_parser("mark-idle", help="释放主执行锁")
     pro_sub.add_parser("mark-discovered", help="记录刚刚完成一轮主动找岗的时间戳")
 
-    # 7. build-dashboard
+    # 7. gate：本地确定性门控与收藏批次统一投递（无需 Pro、纯离线）
+    p_gate = sub.add_parser(
+        "gate",
+        help="本地确定性调度门控：时间窗/每日配额/冷却/收藏批次到点判定（纯离线，无需 Pro）",
+    )
+    p_gate.add_argument("--now", help="可选覆盖 ISO 时间（须带时区，仅用于测试）")
+    p_gate.add_argument(
+        "--assert-dispatch",
+        metavar="BATCH_ID",
+        help="校验指定收藏批次此刻是否允许投递；未到 apply_at 时以非零码退出",
+    )
+
+    # 7b. favorite-batch：延迟批量投递的状态机管理
+    p_fb = sub.add_parser(
+        "favorite-batch",
+        help="收藏批次管理：非工作时间只收藏、到 apply_at 后统一投递（apply_at 之前由代码层拒绝投递）",
+    )
+    fb_sub = p_fb.add_subparsers(dest="fb_cmd", required=True)
+
+    p_fb_new = fb_sub.add_parser("create", help="创建一个收藏批次（apply_at 为允许统一投递的时间点）")
+    p_fb_new.add_argument("--apply-at", required=True, help="允许开始统一投递的时间（ISO-8601，须带时区）")
+    p_fb_new.add_argument("--batch-id", default="", help="自定义批次 ID（默认按当前时间生成）")
+    p_fb_new.add_argument("--note", default="", help="备注：这批收藏的来源与意图")
+
+    p_fb_add = fb_sub.add_parser("add", help="向批次追加一个待投递岗位")
+    p_fb_add.add_argument("--batch-id", required=True)
+    p_fb_add.add_argument("--item-json", required=True, help="岗位 JSON 字符串或 @文件路径（需含 company/title）")
+
+    p_fb_claim = fb_sub.add_parser("claim-next", help="取出下一个待投递项（未到 apply_at 时拒绝）")
+    p_fb_claim.add_argument("--batch-id", required=True)
+    p_fb_claim.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_mark = fb_sub.add_parser("mark", help="标记批次内某岗位的投递结果")
+    p_fb_mark.add_argument("--batch-id", required=True)
+    p_fb_mark.add_argument("--company", required=True)
+    p_fb_mark.add_argument("--title", required=True)
+    p_fb_mark.add_argument(
+        "--outcome",
+        choices=["applied", "skipped"],
+        default="applied",
+        help="applied=已成功投递；skipped=岗位下线/已投过/已被拒而跳过",
+    )
+    p_fb_mark.add_argument("--reason", default="", help="跳过原因")
+    p_fb_mark.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_abort = fb_sub.add_parser("abort", help="因登录失效/验证码中断批次，保留断点供下次续投")
+    p_fb_abort.add_argument("--batch-id", required=True)
+    p_fb_abort.add_argument("--reason", default="")
+
+    p_fb_show = fb_sub.add_parser("show", help="查看全部批次进度与当日配额分桶")
+    p_fb_show.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_fb_list = fb_sub.add_parser("list", help="列出已到点、仍待投递的批次")
+    p_fb_list.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    # 8. build-dashboard
     p_dash = sub.add_parser("build-dashboard", help="构建本地高信息密度只读静态求职看板 HTML")
     p_dash.add_argument("--out", help="输出 HTML 文件路径（默认 <workspace>/dashboard.html）")
     p_dash.add_argument("--open", dest="open_browser", action="store_true", help="生成后自动在系统默认浏览器打开看板页面")
@@ -1060,6 +1115,102 @@ def main(argv: list[str] | None = None) -> int:
                 st = workspace.update_runtime_flag(ws, "mark-discovered")
                 _emit({"ok": True, "runtime_state": st["runtime_state"]})
                 return 0
+
+        if args.cmd == "gate":
+            now_override = gate.parse_iso(args.now) if args.now else None
+            if args.assert_dispatch:
+                try:
+                    gate.assert_batch_dispatch_allowed(ws, args.assert_dispatch, now=now_override)
+                except gate.GateError as exc:
+                    _emit(exc.as_dict())
+                    return 1
+                _emit(
+                    {
+                        "ok": True,
+                        "batch_id": args.assert_dispatch,
+                        "dispatch_allowed": True,
+                        "now": (now_override or gate.local_now()).isoformat(),
+                    }
+                )
+                return 0
+            try:
+                res = gate.evaluate(ws, now=now_override)
+            except gate.GateError as exc:
+                _emit(exc.as_dict())
+                return 1
+            _emit(updater.attach_passive_update_notice(res, home))
+            return 0
+
+        if args.cmd == "favorite-batch":
+            # create/add/abort 未暴露 --now，统一安全取值
+            raw_now = getattr(args, "now", None)
+            now_override = gate.parse_iso(raw_now) if raw_now else None
+            try:
+                if args.fb_cmd == "create":
+                    batch = gate.create_batch(
+                        ws,
+                        apply_at=args.apply_at,
+                        batch_id=args.batch_id,
+                        note=args.note,
+                        now=now_override,
+                    )
+                    _emit({"ok": True, "batch": gate.batch_progress(batch)})
+                    return 0
+
+                if args.fb_cmd == "add":
+                    item = _load_json_arg(args.item_json)
+                    batch = gate.add_item(ws, args.batch_id, item, now=now_override)
+                    _emit({"ok": True, "batch": gate.batch_progress(batch)})
+                    return 0
+
+                if args.fb_cmd == "claim-next":
+                    item = gate.claim_next_persisted(ws, args.batch_id, now=now_override)
+                    store = gate.load_batches(ws)
+                    _emit(
+                        {
+                            "ok": True,
+                            "next_item": item,
+                            "queue_empty": item is None,
+                            "batch": gate.batch_progress(store["batches"][args.batch_id]),
+                        }
+                    )
+                    return 0
+
+                if args.fb_cmd == "mark":
+                    progress = gate.mark_item(
+                        ws,
+                        args.batch_id,
+                        company=args.company,
+                        title=args.title,
+                        outcome=args.outcome,
+                        reason=args.reason,
+                        now=now_override,
+                    )
+                    _emit({"ok": True, "batch": progress})
+                    return 0
+
+                if args.fb_cmd == "abort":
+                    progress = gate.abort_batch(
+                        ws, args.batch_id, reason=args.reason, now=now_override
+                    )
+                    _emit({"ok": True, "batch": progress})
+                    return 0
+
+                if args.fb_cmd == "show":
+                    _emit(
+                        updater.attach_passive_update_notice(
+                            {"ok": True, **gate.snapshot_for_diagnostics(ws, now=now_override)},
+                            home,
+                        )
+                    )
+                    return 0
+
+                if args.fb_cmd == "list":
+                    _emit({"ok": True, "due_batches": gate.due_batches(ws, now=now_override)})
+                    return 0
+            except gate.GateError as exc:
+                _emit(exc.as_dict())
+                return 1
 
         if args.cmd == "build-dashboard":
             out = Path(args.out).expanduser().resolve() if args.out else None

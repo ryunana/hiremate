@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .channel import channel_label, counts_toward_quota, normalize_channel
 from .normalize import (
     _NEGATED_OUTSOURCING_RE,
     companies_match,
@@ -468,7 +469,7 @@ class JobLedger:
             "city": pick_str("city"),
             "recruiter_name": pick_str("recruiter_name"),
             "recruiter_title": pick_str("recruiter_title"),
-            "channel": pick_str("channel", "outbound"),
+            "channel": normalize_channel(pick_str("channel", "outbound")),
             "risk_tags": risk_tags_json,
             "match_reasons": pick_str("match_reasons"),
             "gaps": pick_str("gaps"),
@@ -1182,6 +1183,21 @@ class JobLedger:
         today_opening_sent = 0
         today_outbound_actions = 0
 
+        # 按来源渠道分桶统计当日动作，供额度分桶使用（见 hiremate_lib/channel.py）。
+        # 之所以要分桶：收藏是候选池动作，主动投递是外发动作，批次补投是延迟动作，
+        # 三者的额度语义不同，合并成一个计数会让同一批岗位被重复计费。
+        today_by_channel: dict[str, dict[str, int]] = {}
+
+        def _bucket(ch: str) -> dict[str, int]:
+            key = ch or "outbound"
+            if key not in today_by_channel:
+                today_by_channel[key] = {
+                    "favorited": 0,
+                    "opening_sent": 0,
+                    "counted_opening_sent": 0,
+                }
+            return today_by_channel[key]
+
         jobs_with_rounds = {str(r["job_id"]) for r in round_rows}
         upcoming_interviews_count = sum(1 for r in round_rows if r["outcome"] == "pending")
 
@@ -1189,14 +1205,21 @@ class JobLedger:
             st = row["status"]
             by_status[st] = by_status.get(st, 0) + 1
 
+            row_channel = str(row["channel"] or "outbound")
             fav_ts = row["favorited_at"] or ""
             op_ts = row["opening_sent_at"] or ""
             if st == "favorited" or bool(fav_ts):
                 favorited_total += 1
             if fav_ts.startswith(today_prefix):
                 today_favorited += 1
+                _bucket(row_channel)["favorited"] += 1
             if op_ts.startswith(today_prefix):
                 today_opening_sent += 1
+                bucket = _bucket(row_channel)
+                bucket["opening_sent"] += 1
+                # 只有真正消耗额度的渠道才累加 counted；收藏批次补投等渠道豁免。
+                if counts_toward_quota(row_channel):
+                    bucket["counted_opening_sent"] += 1
             if fav_ts.startswith(today_prefix) or op_ts.startswith(today_prefix):
                 today_outbound_actions += 1
 
@@ -1264,6 +1287,15 @@ class JobLedger:
             "today_favorited": today_favorited,
             "today_opening_sent": today_opening_sent,
             "today_outbound_actions": today_outbound_actions,
+            # 额度分桶：只有 counts_toward_quota() 为真的渠道才计入每日投递额度。
+            # 保留 today_outbound_actions 原值以兼容既有看板与宿主脚本。
+            "today_by_channel": today_by_channel,
+            "today_counted_opening_sent": sum(
+                b["counted_opening_sent"] for b in today_by_channel.values()
+            ),
+            "quota_exempt_channels": sorted(
+                ch for ch in today_by_channel if not counts_toward_quota(ch)
+            ),
         }
 
     def _export_rows_and_headers(self) -> tuple[list[str], list[list[object]]]:
@@ -1314,7 +1346,7 @@ class JobLedger:
                 item["city"],
                 item["recruiter_name"],
                 item["recruiter_title"],
-                item["channel"],
+                channel_label(item["channel"]),
                 " / ".join(item["risk_tags"]),
                 item["match_reasons"],
                 item["gaps"],

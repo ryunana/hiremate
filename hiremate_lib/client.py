@@ -1000,12 +1000,19 @@ def pro_patrol_gate(
     summary = ledger.summary()
     sched = cfg.get("schedule") or {}
     mode_d = str(cfg.get("mode_discover") or "semi")
-    today_actions = int(
-        summary.get(
-            "today_outbound_actions",
-            int(summary.get("today_opening_sent", 0)) + int(summary.get("today_favorited", 0)),
+
+    # 上报云端的「今日已用投递额度」只统计真正消耗额度的渠道。
+    # 早期实现直接取 today_outbound_actions（收藏+投递的合并值），导致收藏动作
+    # 也占用投递额度、同一批岗位隔天投递时被重复计费。详见 hiremate_lib/channel.py。
+    if "today_counted_opening_sent" in summary:
+        today_actions = int(summary.get("today_counted_opening_sent") or 0)
+    else:  # 兼容旧账本对象
+        today_actions = int(
+            summary.get(
+                "today_outbound_actions",
+                int(summary.get("today_opening_sent", 0)) + int(summary.get("today_favorited", 0)),
+            )
         )
-    )
 
     payload = {
         "now_iso": now_override or now_iso(),
@@ -1018,6 +1025,8 @@ def pro_patrol_gate(
         },
         "runtime_state": {
             "delivered_today": today_actions,
+            # 分桶明细供云端按渠道做更细的配额判定；旧云端忽略未知字段即可。
+            "delivered_today_by_channel": summary.get("today_by_channel") or {},
             "main_busy": bool(rt.get("busy", False)),
             "main_busy_since": rt.get("busy_since"),
             "last_discover_at": rt.get("last_discover_at"),
