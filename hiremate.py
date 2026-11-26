@@ -41,6 +41,7 @@ from hiremate_lib import (  # noqa: E402
     __version__,
     channel,
     client,
+    company_intel,
     dashboard,
     favorite_batch,
     ledger,
@@ -551,6 +552,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_fb_list = fb_sub.add_parser("list", help="列出已到点、仍待投递的批次")
     p_fb_list.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    # 6c. company：公司底细核查与正交二维判定（纯本地零网络，同库缓存）
+    p_co = sub.add_parser(
+        "company",
+        help="公司底细核查与缓存：字段级 COALESCE 合并工商/在招岗位，按可行性×可靠性实时判定风险",
+    )
+    co_sub = p_co.add_subparsers(dest="co_cmd", required=True)
+
+    p_co_probe = co_sub.add_parser("probe", help="写入或补抓公司底细并按当前配置输出二维核查结论")
+    p_co_probe.add_argument("--company", required=True, help="公司名称（自动归一化去重）")
+    p_co_probe.add_argument("--legal-name", default="", help="可选：完整工商注册名（用于同名异地主体冲突校验）")
+    p_co_probe.add_argument("--profile-json", default="", help="可选：工商/简介 JSON 字符串或 @文件路径")
+    p_co_probe.add_argument("--jobs-json", default="", help="可选：该公司在招岗位列表 JSON 字符串或 @文件路径")
+    p_co_probe.add_argument("--clear-field", default="", help="可选：显式清空的字段名（逗号分隔，如 former_name,intro）")
+    p_co_probe.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
+
+    p_co_show = co_sub.add_parser("show", help="查询本地已缓存的公司底细并按当前配置实时重算结论")
+    p_co_show.add_argument("--company", required=True, help="公司名称")
+    p_co_show.add_argument("--now", help="可选覆盖 ISO 时间（仅用于测试）")
 
     # 7. build-dashboard
     p_dash = sub.add_parser("build-dashboard", help="构建本地高信息密度只读静态求职看板 HTML")
@@ -1223,6 +1243,44 @@ def main(argv: list[str] | None = None) -> int:
                     _emit({"ok": True, "due_batches": favorite_batch.due_batches(ws, now=now_override)})
                     return 0
             except favorite_batch.BatchGateError as exc:
+                _emit(exc.as_dict())
+                return 1
+
+        if args.cmd == "company":
+            try:
+                if args.co_cmd == "probe":
+                    prof_obj = _load_json_arg(args.profile_json) if args.profile_json else None
+                    jobs_obj = None
+                    if args.jobs_json:
+                        raw_j = args.jobs_json.strip()
+                        if raw_j.startswith("@"):
+                            jobs_obj = json.loads(Path(raw_j[1:]).expanduser().read_text(encoding="utf-8"))
+                        elif raw_j.startswith("[") or raw_j.startswith("{"):
+                            jobs_obj = json.loads(raw_j)
+                        else:
+                            jobs_obj = json.loads(Path(raw_j).expanduser().read_text(encoding="utf-8"))
+                    if jobs_obj is not None and not isinstance(jobs_obj, list):
+                        raise company_intel.CompanyIntelError("INVALID_JOBS", "--jobs-json 必须是岗位对象数组")
+                    res = company_intel.upsert_and_evaluate(
+                        ws,
+                        company=args.company,
+                        legal_name=args.legal_name,
+                        profile=prof_obj if isinstance(prof_obj, dict) else None,
+                        jobs=jobs_obj,
+                        clear_fields=_split_csv(args.clear_field) if args.clear_field else None,
+                        now_override=args.now or None,
+                    )
+                    _emit(res)
+                    return 0
+                if args.co_cmd == "show":
+                    res = company_intel.show_company_intel(
+                        ws,
+                        company=args.company,
+                        now_override=args.now or None,
+                    )
+                    _emit(res)
+                    return 0
+            except company_intel.CompanyIntelError as exc:
                 _emit(exc.as_dict())
                 return 1
 

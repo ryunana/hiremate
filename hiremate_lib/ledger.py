@@ -215,6 +215,27 @@ CREATE TABLE IF NOT EXISTS favorite_batch_items (
 CREATE INDEX IF NOT EXISTS idx_favorite_batch_items_batch_id ON favorite_batch_items(batch_id);
 CREATE INDEX IF NOT EXISTS idx_favorite_batch_items_job_id ON favorite_batch_items(job_id);
 CREATE INDEX IF NOT EXISTS idx_favorite_batch_items_status ON favorite_batch_items(status);
+
+CREATE TABLE IF NOT EXISTS company_intel (
+    company_core TEXT PRIMARY KEY,
+    legal_name TEXT NOT NULL DEFAULT '',
+    company_clean TEXT NOT NULL DEFAULT '',
+    scale TEXT,
+    scale_max_num INTEGER,
+    established TEXT,
+    former_name TEXT,
+    business_scope TEXT,
+    reg_city TEXT,
+    office_city TEXT,
+    intro TEXT,
+    jobs_json TEXT,
+    profile_probed_at TEXT,
+    jobs_probed_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_company_intel_updated_at ON company_intel(updated_at DESC);
 """
 
 
