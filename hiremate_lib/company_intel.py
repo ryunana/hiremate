@@ -151,6 +151,8 @@ _CITY_PROVINCE: dict[str, str] = {
 _CLEARABLE_FIELDS = frozenset({
     "scale",
     "scale_max_num",
+    "financing_stage",
+    "insured_count",
     "established",
     "former_name",
     "business_scope",
@@ -159,6 +161,62 @@ _CLEARABLE_FIELDS = frozenset({
     "intro",
     "jobs_json",
 })
+
+# 异地优质大平台多维识别特征（除 scale_max >= 1000 外，支持融资阶段与头部企业/央国企研发院特征）
+_BIGTECH_FINANCING_KWS = (
+    "已上市",
+    "上市公司",
+    "d轮",
+    "e轮",
+    "f轮",
+    "pre-ipo",
+    "ipo",
+)
+_BIGTECH_IDENTITY_KWS = (
+    "央企",
+    "国企",
+    "国有",
+    "中央研究院",
+    "研发总院",
+    "华为",
+    "腾讯",
+    "阿里",
+    "蚂蚁",
+    "字节",
+    "百度",
+    "美团",
+    "京东",
+    "网易",
+    "小米",
+    "oppo",
+    "vivo",
+    "科大讯飞",
+    "比亚迪",
+    "东风",
+    "一汽",
+    "上汽",
+    "广汽",
+    "吉利",
+    "长安",
+    "大疆",
+    "影石",
+    "insta360",
+    "商汤",
+    "金蝶",
+    "用友",
+    "金山",
+    "快手",
+    "小红书",
+    "携程",
+    "滴滴",
+    "顺丰",
+    "美的",
+    "格力",
+    "海尔",
+    "传音",
+    "安克",
+    "shopee",
+)
 
 
 class CompanyIntelError(Exception):
@@ -215,6 +273,52 @@ def _parse_scale_max(scale_text: str | None) -> int | None:
     if m_below:
         return int(m_below.group(1))
     return None
+
+
+def _parse_insured_count(raw: Any) -> int | None:
+    """解析工商年报/社保参保人数（兼容 int、'13'、'参保13人'、'0人'；0 视为有效事实而非空值）。"""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if raw >= 0 else None
+    text = str(raw).strip()
+    if not text or text.lower() in _PLACEHOLDER_VALUES:
+        return None
+    m = re.search(r"(\d+)", text)
+    if not m:
+        return None
+    return int(m.group(1))
+
+
+def _is_inflated_scale(scale_max: int | None, insured_count: int | None) -> bool:
+    """面板标称规模 ≥500 人，但工商参保人数 <50 人且不足标称上限 10% 时，判定为规模严重虚标。"""
+    if scale_max is None or insured_count is None:
+        return False
+    return scale_max >= 500 and insured_count < 50 and insured_count <= int(scale_max * 0.10)
+
+
+def _is_credible_bigtech(
+    *,
+    legal_name: str,
+    company_clean: str,
+    scale_text: str | None,
+    scale_max: int | None,
+    financing_stage: str | None,
+    intro: str | None,
+    inflated_scale: bool,
+) -> bool:
+    """多维识别异地优质大平台；一旦命中规模虚标（inflated_scale）立即剥夺大厂弹性资格。"""
+    if inflated_scale:
+        return False
+    if scale_max is not None and scale_max >= 1000:
+        return True
+    fin_blob = f"{financing_stage or ''} {scale_text or ''}".lower()
+    if any(kw in fin_blob for kw in _BIGTECH_FINANCING_KWS):
+        return True
+    name_blob = f"{legal_name} {company_clean} {intro or ''}".lower()
+    if any(kw in name_blob for kw in _BIGTECH_IDENTITY_KWS):
+        return True
+    return False
 
 
 def _parse_established_years(established: str | None, now_dt: datetime) -> float | None:
@@ -358,16 +462,29 @@ def evaluate_company_record(
     target_roles = [str(r).strip().lower() for r in (config.get("target_roles") or []) if str(r).strip()]
 
     legal_name = str(record.get("legal_name") or record.get("company_clean") or record.get("company_core") or "")
+    company_clean = str(record.get("company_clean") or "")
     scale_text = _clean_optional_text(record.get("scale"))
     scale_max = record.get("scale_max_num")
     if scale_max is None and scale_text:
         scale_max = _parse_scale_max(scale_text)
+    financing_stage = _clean_optional_text(record.get("financing_stage"))
+    insured_count = _parse_insured_count(record.get("insured_count"))
     established = _clean_optional_text(record.get("established"))
     former_name = _clean_optional_text(record.get("former_name"))
     business_scope = _clean_optional_text(record.get("business_scope"))
     reg_city = _clean_optional_text(record.get("reg_city"))
     office_city = _clean_optional_text(record.get("office_city"))
     intro = _clean_optional_text(record.get("intro"))
+    inflated_scale = _is_inflated_scale(scale_max, insured_count)
+    credible_bigtech = _is_credible_bigtech(
+        legal_name=legal_name,
+        company_clean=company_clean,
+        scale_text=scale_text,
+        scale_max=scale_max,
+        financing_stage=financing_stage,
+        intro=intro,
+        inflated_scale=inflated_scale,
+    )
 
     # 解析 jobs 并过滤出 30 天内活跃岗位用于跨度与门店占比分析
     all_jobs: list[dict[str, Any]] = []
@@ -404,7 +521,7 @@ def evaluate_company_record(
         feasibility = "unknown"
     elif any(any(pc in jc or jc in pc for jc in job_cities) for pc in preferred_cities):
         feasibility = "local_match"
-    elif remote_bigtech_flex and (scale_max is not None and scale_max >= 1000):
+    elif remote_bigtech_flex and credible_bigtech:
         feasibility = "remote_flex"
     else:
         feasibility = "remote_mismatch"
@@ -539,6 +656,15 @@ def evaluate_company_record(
             f"reg_city={reg_city}, office_city={office_city}",
         )
 
+    # 2h. 面板标称规模与工商参保人数严重倒挂（规模虚标高风险）
+    if inflated_scale and insured_count is not None:
+        _add_risk(
+            "inflated_scale",
+            "high",
+            f"面板标称规模（{scale_text or f'{scale_max}人'}）与工商社保参保人数（{insured_count}人）严重倒挂，存在空壳或规模虚标风险",
+            f"scale={scale_text or scale_max}, insured_count={insured_count}",
+        )
+
     # 3. 汇总可靠性等级
     critical_cnt = sum(1 for r in risk_items if r["severity"] == "critical")
     high_cnt = sum(1 for r in risk_items if r["severity"] == "high")
@@ -564,7 +690,9 @@ def evaluate_company_record(
         verdict = "explorable"
 
     # 5. 置信度与缓存新鲜度（profile 与 jobs 分开计时）
-    has_profile_facts = bool(scale_text or established or business_scope or intro)
+    has_profile_facts = bool(
+        scale_text or financing_stage or insured_count is not None or established or business_scope or intro
+    )
     has_jobs = len(recent_jobs) > 0
     if has_profile_facts and has_jobs:
         confidence = "high"
@@ -612,6 +740,8 @@ def evaluate_company_record(
         "facts": {
             "scale": scale_text,
             "scale_max_num": scale_max,
+            "financing_stage": financing_stage,
+            "insured_count": insured_count,
             "established": established,
             "former_name": former_name,
             "business_scope": business_scope,
@@ -656,6 +786,8 @@ def upsert_and_evaluate(
         except (TypeError, ValueError):
             in_scale_max = None
     in_established = _clean_optional_text(prof.get("established"))
+    in_financing_stage = _clean_optional_text(prof.get("financing_stage"))
+    in_insured_count = _parse_insured_count(prof.get("insured_count"))
     in_former_name = _clean_optional_text(prof.get("former_name"))
     in_scope = _clean_optional_text(prof.get("business_scope"))
     in_reg_city = _clean_optional_text(prof.get("reg_city"))
@@ -664,7 +796,18 @@ def upsert_and_evaluate(
 
     has_profile_input = any(
         v is not None
-        for v in (in_scale, in_scale_max, in_established, in_former_name, in_scope, in_reg_city, in_office_city, in_intro)
+        for v in (
+            in_scale,
+            in_scale_max,
+            in_financing_stage,
+            in_insured_count,
+            in_established,
+            in_former_name,
+            in_scope,
+            in_reg_city,
+            in_office_city,
+            in_intro,
+        )
     )
     has_jobs_input = isinstance(jobs, list) and len(jobs) > 0
     clears = {f.strip() for f in (clear_fields or []) if f.strip() in _CLEARABLE_FIELDS}
@@ -725,6 +868,8 @@ def upsert_and_evaluate(
                     company_clean = CASE WHEN TRIM(?) != '' THEN ? ELSE company_clean END,
                     scale = ?,
                     scale_max_num = ?,
+                    financing_stage = ?,
+                    insured_count = ?,
                     established = ?,
                     former_name = ?,
                     business_scope = ?,
@@ -744,6 +889,8 @@ def upsert_and_evaluate(
                     clean_c,
                     None if "scale" in clears else merged_scale,
                     None if "scale_max_num" in clears or "scale" in clears else merged_scale_max,
+                    _pick("financing_stage", in_financing_stage),
+                    _pick("insured_count", in_insured_count),
                     _pick("established", in_established),
                     _pick("former_name", in_former_name),
                     _pick("business_scope", in_scope),
@@ -763,11 +910,11 @@ def upsert_and_evaluate(
                 """
                 INSERT INTO company_intel (
                     company_core, legal_name, company_clean,
-                    scale, scale_max_num, established, former_name,
+                    scale, scale_max_num, financing_stage, insured_count, established, former_name,
                     business_scope, reg_city, office_city, intro,
                     jobs_json, profile_probed_at, jobs_probed_at,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     core_c,
@@ -775,6 +922,8 @@ def upsert_and_evaluate(
                     clean_c,
                     in_scale,
                     in_scale_max,
+                    in_financing_stage,
+                    in_insured_count,
                     in_established,
                     in_former_name,
                     in_scope,

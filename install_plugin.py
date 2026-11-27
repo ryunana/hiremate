@@ -627,19 +627,61 @@ def _register_antigravity_sidecar(
     agy_root: Path,
     canon_home: Path,
     cli_skill_dir: Path | None = None,
+    *,
+    embed_skill_link: bool = True,
 ) -> dict[str, Any]:
-    """在 Antigravity 配置目录下挂载求职助手侧边栏与分屏看板 Sidecar。"""
+    """在 Antigravity 配置目录下封装原生 plugins/hiremate 插件包（含技能软链与侧边栏看板 Sidecar），并清理旧版散装残留。"""
     src_main = OPEN_ROOT / "antigravity" / "sidecar" / "main.mjs"
     if not src_main.is_file():
         return {"registered": False, "reason": "sidecar_source_missing"}
 
-    sidecar_dir = agy_root / "sidecars" / "hiremate_board"
+    effective_skill_dir = cli_skill_dir or (canon_home / "skill" / "hiremate")
+    plugin_dir = agy_root / "plugins" / "hiremate"
+    if plugin_dir.is_symlink():
+        plugin_dir.unlink()
+    assets_dir = plugin_dir / "assets"
+    sidecar_dir = plugin_dir / "sidecars" / "hiremate_board"
+    assets_dir.mkdir(parents=True, exist_ok=True)
     if sidecar_dir.is_symlink():
         sidecar_dir.unlink()
     sidecar_dir.mkdir(parents=True, exist_ok=True)
+
+    # 清理旧版散装挂载残留，防止与 plugins/hiremate 产生同名技能冲突或死机副本（保留 plugins/hiremate/sidecars 下的其他自定义子目录）
+    _remove_link_or_dir(agy_root / "sidecars" / "hiremate_board")
+    loose_skill = agy_root / "skills" / "hiremate"
+    if loose_skill != effective_skill_dir:
+        _remove_link_or_dir(loose_skill)
+
+    icon_src = OPEN_ROOT / "dsh" / "icon.svg"
+    if icon_src.is_file():
+        shutil.copy2(icon_src, assets_dir / "logo.svg")
+    else:
+        (assets_dir / "logo.svg").write_text(DEFAULT_ICON_SVG, encoding="utf-8")
+
+    plugin_manifest = {
+        "name": "hiremate",
+        "displayName": "求职助手 (HireMate)",
+        "version": _read_open_version(),
+        "description": "求职助手（HireMate）：逐岗排雷精筛、公司底细二维核查、收藏批次管理与实时投递转化漏斗看板。",
+        "logo": "assets/logo.svg",
+        "suggestedPrompts": [
+            "帮我初始化求职助手",
+            "去 BOSS 直聘跑一轮岗位深筛并生成审阅单",
+            "打开求职助手可视化漏斗看板",
+        ],
+    }
+    (plugin_dir / "plugin.json").write_text(
+        json.dumps(plugin_manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    plugin_skill_dir = plugin_dir / "skills" / "hiremate"
+    skill_link_mode = "embedded"
+    if embed_skill_link and plugin_skill_dir != effective_skill_dir:
+        skill_link_mode = _link_skill_dir(effective_skill_dir, plugin_skill_dir)
+
     shutil.copy2(src_main, sidecar_dir / "main.mjs")
 
-    effective_skill_dir = cli_skill_dir or (canon_home / "skill" / "hiremate")
     rw_paths = [str(canon_home)]
     if str(effective_skill_dir) not in rw_paths and not str(effective_skill_dir).startswith(str(canon_home)):
         rw_paths.append(str(effective_skill_dir))
@@ -683,7 +725,11 @@ def _register_antigravity_sidecar(
     )
     return {
         "registered": True,
-        "sidecar_id": "hiremate_board",
+        "plugin_name": "hiremate",
+        "plugin_dir": str(plugin_dir),
+        "skill_dir": str(plugin_skill_dir),
+        "link_mode": skill_link_mode,
+        "sidecar_id": "hiremate/hiremate_board",
         "sidecar_dir": str(sidecar_dir),
         "entrypoints": ["SIDECAR_UI_ENTRYPOINT_SIDEBAR", "SIDECAR_UI_ENTRYPOINT_AUX_PANE"],
     }
@@ -775,6 +821,8 @@ def uninstall(
             _unregister_codex_host_plugin(h_root)
             _remove_link_or_dir(h_root / ".hiremate-local")
         elif h_name == "antigravity":
+            _remove_link_or_dir(h_root / "plugins" / "hiremate" / "skills" / "hiremate")
+            _remove_link_or_dir(h_root / "plugins" / "hiremate")
             _remove_link_or_dir(h_root / "sidecars" / "hiremate_board")
 
     # 先清理包含内部软链/Junction 的子包目录，再删除主副本 canon_dir，防止 Windows 悬空 Junction 导致 rmtree 报错
@@ -883,11 +931,14 @@ def _build_sidebar_install_guide(caller_host: str, sidebar_registrations: dict[s
         return {
             "current_host": "antigravity",
             "current_host_supports_sidebar": True,
-            "sidebar_entry": "侧边栏 / 右侧辅助面板「求职助手看板」",
-            "sidebar_entry_tip": "📌 侧边栏看板已就绪：可在 Antigravity 侧边栏或右侧辅助面板直接找到并打开「求职助手看板」。",
+            "sidebar_entry": "侧边栏 / 右侧辅助面板「求职助手看板」（sidecar://hiremate/hiremate_board/aux）",
+            "sidebar_entry_tip": (
+                "📌 原生插件与侧边栏看板已就绪：可在 Antigravity 侧边栏或点击 `[求职助手看板](sidecar://hiremate/hiremate_board/aux)` 直接展开看板，"
+                "并通过 `[求职助手](customization://hiremate)` 管理插件总开关。"
+            ),
             "agent_must_tell_user": (
-                "你当前运行在支持侧边栏看板的 Antigravity 中，请在回复中提醒新用户："
-                "可以通过侧边栏或右侧辅助面板中的「求职助手看板」随时打开可视化求职看板。"
+                "你当前运行在支持原生插件面板的 Antigravity 中，请在回复中提供 `[求职助手看板](sidecar://hiremate/hiremate_board/aux)` 快捷入口，"
+                "并告知可通过侧边栏或 `[求职助手](customization://hiremate)` 随时查看与管理。"
             ),
             "next_step": "安装已完成！可在侧边栏点开「求职助手看板」，或直接对 AI 助手说：『帮我初始化求职助手』",
         }
@@ -968,6 +1019,20 @@ def install(
         dsh_registrations: list[dict[str, Any]] = []
         sidebar_registrations: dict[str, Any] = {}
         for h_name, h_root in hosts:
+            if h_name == "antigravity":
+                areg = _register_antigravity_sidecar(h_root, canon_home, cli_skill_dir=canon_dir)
+                sidebar_registrations["antigravity"] = areg
+                linked_hosts.append(
+                    {
+                        "host": h_name,
+                        "skill_dir": areg.get("skill_dir", str(h_root / "plugins" / "hiremate" / "skills" / "hiremate")),
+                        "link_mode": areg.get("link_mode", "symlink"),
+                        "antigravity_sidecar": areg,
+                        "sidebar": areg,
+                    }
+                )
+                continue
+
             link_path = h_root / "skills" / "hiremate"
             same_as_canon = False
             try:
@@ -992,11 +1057,6 @@ def install(
                     host_entry["codex_plugin"] = creg
                     host_entry["sidebar"] = creg
                     sidebar_registrations["codex"] = creg
-                elif h_name == "antigravity":
-                    areg = _register_antigravity_sidecar(h_root, canon_home)
-                    host_entry["antigravity_sidecar"] = areg
-                    host_entry["sidebar"] = areg
-                    sidebar_registrations["antigravity"] = areg
                 linked_hosts.append(host_entry)
 
         caller_host = _detect_active_caller_host()
@@ -1030,7 +1090,11 @@ def install(
         else primary_skill_md
     )
     host_root = _host_root_dir(effective_target, dest_root)
-    dest_dir = host_root / "skills" / "hiremate"
+    dest_dir = (
+        host_root / "plugins" / "hiremate" / "skills" / "hiremate"
+        if effective_target == "antigravity"
+        else host_root / "skills" / "hiremate"
+    )
     planned = [str(dest_dir / "SKILL.md")] + [str(dest_dir / item) for item in RUNTIME_FILES]
 
     if dry_run:
@@ -1056,21 +1120,28 @@ def install(
         elif effective_target == "codex":
             codex_reg = _register_codex_host_plugin(host_root, host_root / ".hiremate-local", dest_dir)
         elif effective_target == "antigravity":
-            agy_reg = _register_antigravity_sidecar(host_root, _canonical_home_dir(canonical_home), cli_skill_dir=dest_dir)
+            agy_reg = _register_antigravity_sidecar(
+                host_root,
+                _canonical_home_dir(canonical_home),
+                cli_skill_dir=dest_dir,
+                embed_skill_link=False,
+            )
     else:
         canon_home = _canonical_home_dir(canonical_home)
         canon_dir = _canonical_skill_dir(canonical_home)
         dsh_plugin_dir = _canonical_dsh_plugin_dir(canonical_home)
         _copy_runtime_into(canon_dir, primary_skill_md)
         _install_dsh_bundle_files(dsh_plugin_dir, canon_dir)
-        link_mode = _link_skill_dir(canon_dir, dest_dir)
         canon_str = str(canon_dir)
-        if effective_target == "dsh":
-            dsh_reg = _register_dsh_host_plugin(host_root, dsh_plugin_dir)
-        elif effective_target == "codex":
-            codex_reg = _register_codex_host_plugin(host_root, canon_home, canon_dir)
-        elif effective_target == "antigravity":
-            agy_reg = _register_antigravity_sidecar(host_root, canon_home)
+        if effective_target == "antigravity":
+            agy_reg = _register_antigravity_sidecar(host_root, canon_home, cli_skill_dir=canon_dir)
+            link_mode = str(agy_reg.get("link_mode") or "symlink")
+        else:
+            link_mode = _link_skill_dir(canon_dir, dest_dir)
+            if effective_target == "dsh":
+                dsh_reg = _register_dsh_host_plugin(host_root, dsh_plugin_dir)
+            elif effective_target == "codex":
+                codex_reg = _register_codex_host_plugin(host_root, canon_home, canon_dir)
 
     single_sb_regs: dict[str, Any] = {}
     if dsh_reg:

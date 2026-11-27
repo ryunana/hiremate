@@ -322,6 +322,139 @@ class TestCompanyIntel(unittest.TestCase):
         self.assertEqual(res_show["feasibility"], "remote_mismatch")
         self.assertEqual(res_show["verdict"], "not_feasible")
 
+    # Issue #5：异地大厂多维识别（融资阶段/头部研发院）+ 面板规模与参保人数倒挂（inflated_scale）+ 旧库平滑迁移 + icebreaker_mode
+    def test_issue5_remote_bigtech_multidim_and_inflated_scale_and_icebreaker_mode(self) -> None:
+        import sqlite3
+
+        self._init("深圳")
+
+        # 0. 验证 icebreaker_mode 配置默认 custom，且可切换为 platform_default
+        rc, cfg0 = _run_cli(self._flags() + ["config", "show"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(cfg0["config"]["icebreaker_mode"], "custom")
+        rc, cfg_set = _run_cli(self._flags() + ["config", "set", "--icebreaker-mode", "platform_default"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(cfg_set["config"]["icebreaker_mode"], "platform_default")
+
+        # 1. 模拟旧版无 financing_stage / insured_count 列的 company_intel 表，验证自动平滑迁移零丢数据
+        db_file = self.ws / "ledger.sqlite3"
+        c_old = sqlite3.connect(db_file)
+        c_old.execute("DROP TABLE IF EXISTS company_intel")
+        c_old.execute(
+            """
+            CREATE TABLE company_intel (
+                company_core TEXT PRIMARY KEY,
+                legal_name TEXT NOT NULL DEFAULT '',
+                company_clean TEXT NOT NULL DEFAULT '',
+                scale TEXT,
+                scale_max_num INTEGER,
+                established TEXT,
+                former_name TEXT,
+                business_scope TEXT,
+                reg_city TEXT,
+                office_city TEXT,
+                intro TEXT,
+                jobs_json TEXT,
+                profile_probed_at TEXT,
+                jobs_probed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        c_old.execute(
+            "INSERT INTO company_intel (company_core, legal_name, company_clean, scale, scale_max_num, created_at, updated_at) "
+            "VALUES ('旧表企业', '旧表企业有限公司', '旧表企业', '100-499人', 499, '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')"
+        )
+        c_old.commit()
+        c_old.close()
+
+        # 2. 异地研发总院 / 已上市企业（面板规模 500-999 人或尚未传 scale）在 remote_bigtech_flex=True 下判 remote_flex
+        rc, res_inst = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "某国有汽车集团研发总院",
+                "--profile-json",
+                json.dumps({"scale": "500-999人", "financing_stage": "已上市", "office_city": "北京"}, ensure_ascii=False),
+                "--jobs-json",
+                json.dumps([{"title": "AI产品经理", "city": "北京"}, {"title": "智能体架构师", "city": "武汉"}], ensure_ascii=False),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(res_inst["feasibility"], "remote_flex")
+        self.assertEqual(res_inst["verdict"], "explorable")
+
+        # 尚未抓到 scale（scale=None）但名称命中头部企业/央国企研发院 -> 同样允许 remote_flex，不误杀为 not_feasible
+        rc, res_noscale = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "某央企智能科技研究院",
+                "--jobs-json",
+                json.dumps([{"title": "AI产品经理", "city": "上海"}], ensure_ascii=False),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(res_noscale["feasibility"], "remote_flex")
+        self.assertNotEqual(res_noscale["verdict"], "not_feasible")
+
+        # 3. 本地企业面板虚标 1000-9999 人，但工商参保仅 13 人 -> 触发 inflated_scale -> explorable_high_risk
+        rc, res_fake_local = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "深圳某铺货网络科技有限公司",
+                "--profile-json",
+                json.dumps(
+                    {
+                        "scale": "1000-9999人",
+                        "insured_count": "参保13人",
+                        "office_city": "深圳",
+                    },
+                    ensure_ascii=False,
+                ),
+                "--jobs-json",
+                json.dumps([{"title": "AI产品经理", "city": "深圳"}], ensure_ascii=False),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("inflated_scale", res_fake_local["risk_flags"])
+        self.assertEqual(res_fake_local["facts"]["insured_count"], 13)
+        self.assertEqual(res_fake_local["verdict"], "explorable_high_risk")
+
+        # 4. 异地企业面板虚标 1000-9999 人但参保仅 15 人 -> 剥夺大厂弹性资格，直接判 remote_mismatch -> not_feasible
+        rc, res_fake_remote = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "苏州某空壳网络有限公司",
+                "--profile-json",
+                json.dumps(
+                    {
+                        "scale": "1000-9999人",
+                        "insured_count": 15,
+                        "office_city": "苏州",
+                    },
+                    ensure_ascii=False,
+                ),
+                "--jobs-json",
+                json.dumps([{"title": "AI产品经理", "city": "苏州"}], ensure_ascii=False),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("inflated_scale", res_fake_remote["risk_flags"])
+        self.assertEqual(res_fake_remote["feasibility"], "remote_mismatch")
+        self.assertEqual(res_fake_remote["verdict"], "not_feasible")
+
 
 if __name__ == "__main__":
     unittest.main()

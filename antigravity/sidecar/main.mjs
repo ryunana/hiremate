@@ -10,6 +10,7 @@ const app = new SidecarApp();
 const ALLOWED_UI_PATCH_KEYS = new Set([
   'mode_discover',
   'mode_reply',
+  'icebreaker_mode',
   'target_roles',
   'preferred_cities',
   'remote_bigtech_flex',
@@ -31,6 +32,7 @@ function resolvePaths() {
   const candidates = [
     ...(process.env.HIREMATE_CLI_PATH ? [process.env.HIREMATE_CLI_PATH] : []),
     join(homeDir, 'skill', 'hiremate', 'hiremate.py'),
+    join(homedir(), '.gemini', 'config', 'plugins', 'hiremate', 'skills', 'hiremate', 'hiremate.py'),
     join(homedir(), '.gemini', 'config', 'skills', 'hiremate', 'hiremate.py'),
   ];
   const cliPath = candidates.find((p) => existsSync(p)) || candidates[0];

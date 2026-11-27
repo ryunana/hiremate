@@ -190,6 +190,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--headhunter-policy", choices=workspace.VALID_HEADHUNTER_POLICIES, help="猎头策略：block_all / inbound_only（默认）/ allow_all")
     p_init.add_argument("--inbound-resume-policy", choices=("generous", "strict"), help="被动索要简历策略：generous（默认尽量给）/ strict（仅高匹配给）")
     p_init.add_argument(
+        "--icebreaker-mode",
+        choices=workspace.VALID_ICEBREAKER_MODES,
+        help="开场打招呼模式：custom（默认拟1-2句破冰短句）/ platform_default（仅用平台默认招呼语，不追加自定义句子）",
+    )
+    p_init.add_argument(
         "--filter-outsourcing",
         choices=("true", "false"),
         help="是否过滤外包/派遣/OD 岗位（默认 true；传 false 表示接受外包机会）",
@@ -289,6 +294,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_cfg_set.add_argument("--blocked-companies", help="设置额外屏蔽企业列表（逗号分隔，前东家仍自动保留保护）")
     p_cfg_set.add_argument("--exclude-keywords", help="设置岗位排除关键词列表（逗号分隔）")
     p_cfg_set.add_argument("--headhunter-policy", choices=workspace.VALID_HEADHUNTER_POLICIES)
+    p_cfg_set.add_argument(
+        "--icebreaker-mode",
+        choices=workspace.VALID_ICEBREAKER_MODES,
+        help="开场打招呼模式：custom=拟定破冰短句，platform_default=仅使用平台默认招呼语",
+    )
     p_cfg_set.add_argument(
         "--filter-outsourcing",
         choices=("true", "false"),
@@ -671,6 +681,7 @@ def main(argv: list[str] | None = None) -> int:
                 browser_provider=args.browser_provider,
                 resume_source=args.resume_source,
                 mode_discover=args.mode_discover,
+                icebreaker_mode=args.icebreaker_mode,
                 tier=tier,
                 force=args.force,
                 reset_profile=args.reset_profile,
@@ -783,6 +794,8 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["exclude_keywords"] = _split_csv(args.exclude_keywords)
                 if args.headhunter_policy:
                     cli_patch["headhunter_policy"] = args.headhunter_policy
+                if args.icebreaker_mode:
+                    cli_patch["icebreaker_mode"] = args.icebreaker_mode
                 if args.filter_outsourcing:
                     cli_patch["filter_outsourcing"] = args.filter_outsourcing == "true"
                 if args.outsourcing_policy:
