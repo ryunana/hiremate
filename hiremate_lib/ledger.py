@@ -222,6 +222,8 @@ CREATE TABLE IF NOT EXISTS company_intel (
     company_clean TEXT NOT NULL DEFAULT '',
     scale TEXT,
     scale_max_num INTEGER,
+    financing_stage TEXT,
+    insured_count INTEGER,
     established TEXT,
     former_name TEXT,
     business_scope TEXT,
@@ -476,6 +478,16 @@ class JobLedger:
                     s = stmt.strip()
                     if s:
                         conn.execute(s)
+
+                ci_cols = {
+                    str(r["name"])
+                    for r in conn.execute("PRAGMA table_info(company_intel)").fetchall()
+                }
+                if "financing_stage" not in ci_cols:
+                    conn.execute("ALTER TABLE company_intel ADD COLUMN financing_stage TEXT")
+                if "insured_count" not in ci_cols:
+                    conn.execute("ALTER TABLE company_intel ADD COLUMN insured_count INTEGER")
+
                 conn.execute("COMMIT;")
             except Exception:
                 try:

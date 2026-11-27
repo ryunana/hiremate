@@ -2744,7 +2744,11 @@ console.log(JSON.stringify({{ id: loaded.id, isPlugin: mod.isPlugin, slots }}));
         sb_codex = self.root / "sb_codex"
         sb_codex.mkdir()
         sb_agy = self.root / "sb_agy"
-        sb_agy.mkdir()
+        # 模拟旧版散装残留 + 用户自定义的其他插件 Sidecar 子目录，验证升级自动清理旧残留且不误删自定义子目录
+        (sb_agy / "skills" / "hiremate").mkdir(parents=True)
+        (sb_agy / "sidecars" / "hiremate_board").mkdir(parents=True)
+        (sb_agy / "plugins" / "hiremate" / "sidecars" / "custom_helper").mkdir(parents=True)
+        (sb_agy / "plugins" / "hiremate" / "sidecars" / "custom_helper" / "keep.txt").write_text("ok", encoding="utf-8")
 
         inst_all = install_plugin.install(
             target="auto",
@@ -2762,8 +2766,15 @@ console.log(JSON.stringify({{ id: loaded.id, isPlugin: mod.isPlugin, slots }}));
         self.assertTrue(Path(codex_reg["cache_dir"]).joinpath(".codex-plugin", "plugin.json").is_file())
         self.assertTrue(Path(codex_reg["cache_dir"]).joinpath(".mcp.json").is_file())
 
+        agy_plugin_dir = sb_agy / "plugins" / "hiremate"
+        self.assertTrue((agy_plugin_dir / "plugin.json").is_file())
+        self.assertTrue((agy_plugin_dir / "assets" / "logo.svg").is_file())
+        self.assertTrue((agy_plugin_dir / "skills" / "hiremate" / "SKILL.md").is_file())
+        self.assertFalse((sb_agy / "sidecars" / "hiremate_board").exists())
+        self.assertFalse((sb_agy / "skills" / "hiremate").exists())
+        self.assertTrue((agy_plugin_dir / "sidecars" / "custom_helper" / "keep.txt").is_file())
         agy_sidecar_json = json.loads(
-            (sb_agy / "sidecars" / "hiremate_board" / "sidecar.json").read_text(encoding="utf-8")
+            (agy_plugin_dir / "sidecars" / "hiremate_board" / "sidecar.json").read_text(encoding="utf-8")
         )
         entrypoints = [v["entrypoint"] for v in agy_sidecar_json["ui_config"]["views"]]
         self.assertIn("SIDECAR_UI_ENTRYPOINT_SIDEBAR", entrypoints)
@@ -3099,10 +3110,11 @@ mainComp();
         )
         self.assertTrue(inst["ok"])
         self.assertTrue((rev_dsh / "profiles" / "desktop" / "node_modules" / "hiremate-dsh").exists())
-        agy_sc_cfg = json.loads((rev_agy / "sidecars" / "hiremate_board" / "sidecar.json").read_text(encoding="utf-8"))
+        agy_board_dir = rev_agy / "plugins" / "hiremate" / "sidecars" / "hiremate_board"
+        agy_sc_cfg = json.loads((agy_board_dir / "sidecar.json").read_text(encoding="utf-8"))
         self.assertEqual(agy_sc_cfg["restart_policy"], "always")
         self.assertIn("HIREMATE_CLI_PATH", agy_sc_cfg["env"])
-        agy_main_src = (rev_agy / "sidecars" / "hiremate_board" / "main.mjs").read_text(encoding="utf-8")
+        agy_main_src = (agy_board_dir / "main.mjs").read_text(encoding="utf-8")
         self.assertIn('<script src="/preload.js"></script>', agy_main_src)
         codex_toml = (rev_codex / "config.toml").read_text(encoding="utf-8")
         self.assertEqual(codex_toml.count("[marketplaces.hiremate]"), 1)
@@ -3117,6 +3129,7 @@ mainComp();
             canonical_home=str(rev_canon),
             search_roots={"dsh": rev_dsh, "codex": rev_codex, "antigravity": rev_agy},
         )
+        self.assertFalse((rev_agy / "plugins" / "hiremate").exists())
         after_patch = (rev_dsh / "profiles" / "desktop" / "cordis.patch.yml").read_text(encoding="utf-8")
         self.assertNotIn("hiremate-dsh", after_patch)
         self.assertIn("other-plugin", after_patch)

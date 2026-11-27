@@ -161,6 +161,7 @@ function readJsonBody(req, maxBytes = 16 * 1024) {
 const ALLOWED_UI_PATCH_KEYS = new Set([
   'mode_discover',
   'mode_reply',
+  'icebreaker_mode',
   'target_roles',
   'preferred_cities',
   'remote_bigtech_flex',
