@@ -322,6 +322,102 @@ class TestCompanyIntel(unittest.TestCase):
         self.assertEqual(res_show["feasibility"], "remote_mismatch")
         self.assertEqual(res_show["verdict"], "not_feasible")
 
+    # Issue #5 (1 & 2)：参保人数倒挂识破（inflated_scale）+ 多因子可信大厂/上市企业/研究院异地弹性（remote_flex）
+    def test_inflated_scale_and_credible_bigtech_remote_flex(self) -> None:
+        self._init("深圳")
+
+        # 1. 异地（北京）500-999 人但已上市 / 研究院主体 -> 应识别为 remote_flex（不被 <1000 人一刀切误杀）
+        rc, res_listed = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "北京合合信息科技股份有限公司",
+                "--profile-json",
+                json.dumps(
+                    {
+                        "scale": "500-999人",
+                        "financing_stage": "已上市",
+                        "insured_count": 620,
+                        "office_city": "北京",
+                        "intro": "科创板上市人工智能及大数据科技企业",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(res_listed["feasibility"], "remote_flex")
+        self.assertEqual(res_listed["verdict"], "explorable")
+        self.assertEqual(res_listed["facts"]["financing_stage"], "已上市")
+        self.assertEqual(res_listed["facts"]["insured_count"], 620)
+
+        # 异地研究院（规模暂缺）-> 同样识别为 remote_flex
+        rc, res_inst = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "北京智源人工智能研究院",
+                "--profile-json",
+                json.dumps({"office_city": "北京", "intro": "大模型与具身智能前沿基础研究机构"}, ensure_ascii=False),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertEqual(res_inst["feasibility"], "remote_flex")
+        self.assertEqual(res_inst["verdict"], "explorable")
+
+        # 2. 面板标称 1000-9999 人，但工商参保仅 13 人 -> 触发 inflated_scale：
+        #    a) 本地（深圳）降级为 explorable_high_risk
+        rc, res_inf_local = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "深圳某巨无霸网络科技有限公司",
+                "--profile-json",
+                json.dumps(
+                    {
+                        "scale": "1000-9999人",
+                        "insured_count": "13人",
+                        "office_city": "深圳",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("inflated_scale", res_inf_local["risk_flags"])
+        self.assertEqual(res_inf_local["reliability"], "high_risk")
+        self.assertEqual(res_inf_local["verdict"], "explorable_high_risk")
+
+        #    b) 异地（上海）剥夺 remote_flex 豁免资格 -> remote_mismatch + not_feasible
+        rc, res_inf_remote = _run_cli(
+            self._flags()
+            + [
+                "company",
+                "probe",
+                "--company",
+                "上海某注水云科技有限公司",
+                "--profile-json",
+                json.dumps(
+                    {
+                        "scale": "1000-9999人",
+                        "insured_count": 8,
+                        "office_city": "上海",
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        self.assertEqual(rc, 0)
+        self.assertIn("inflated_scale", res_inf_remote["risk_flags"])
+        self.assertEqual(res_inf_remote["feasibility"], "remote_mismatch")
+        self.assertEqual(res_inf_remote["verdict"], "not_feasible")
+
 
 if __name__ == "__main__":
     unittest.main()

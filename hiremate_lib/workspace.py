@@ -36,6 +36,7 @@ VALID_CHANNEL_POLICIES = ("block_all", "inbound_only", "allow_all")
 VALID_HEADHUNTER_POLICIES = VALID_CHANNEL_POLICIES
 VALID_INBOUND_RESUME_POLICIES = ("generous", "strict")
 VALID_SALARY_MATCH_MODES = ("ceiling_tolerant", "ceiling_strict", "floor_strict")
+VALID_ICEBREAKER_MODES = ("custom", "platform_default")
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 PROFILE_TEMPLATE_PATH = PACKAGE_ROOT / "templates" / "profile_facts.md"
@@ -72,6 +73,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         }
     ],
     "inbound_resume_policy": "generous",
+    "icebreaker_mode": "custom",
     "reply_style": "concise_natural",
     "execution_rules_file": "",
     "schedule": {
@@ -317,6 +319,11 @@ def validate_and_normalize_config(raw_cfg: dict[str, Any]) -> dict[str, Any]:
     if cfg["inbound_resume_policy"] not in VALID_INBOUND_RESUME_POLICIES:
         raise ValueError(
             f"inbound_resume_policy 仅支持 {VALID_INBOUND_RESUME_POLICIES}，收到: {cfg['inbound_resume_policy']!r}"
+        )
+    cfg["icebreaker_mode"] = str(cfg.get("icebreaker_mode") or "custom").strip() or "custom"
+    if cfg["icebreaker_mode"] not in VALID_ICEBREAKER_MODES:
+        raise ValueError(
+            f"icebreaker_mode 仅支持 {VALID_ICEBREAKER_MODES}，收到: {cfg['icebreaker_mode']!r}"
         )
 
     out_pol, out_flag = _resolve_policy_and_flag(
@@ -1766,6 +1773,7 @@ def init_workspace(
     execution_mode: str | None = None,
     browser_provider: str | None = None,
     resume_source: str | None = None,
+    icebreaker_mode: str | None = None,
     mode_discover: str | None = None,
     tier: str = "free",
     force: bool = False,
@@ -1850,6 +1858,8 @@ def init_workspace(
         init_patch["browser_provider"] = browser_provider
     if resume_source is not None:
         init_patch["resume_source"] = resume_source
+    if icebreaker_mode is not None:
+        init_patch["icebreaker_mode"] = icebreaker_mode
     if mode_discover is not None:
         init_patch["mode_discover"] = mode_discover
     if init_patch:

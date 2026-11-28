@@ -3231,6 +3231,43 @@ try {{
             self.assertEqual(srv_out["blockedNoHdr"]["status"], 403)
             self.assertEqual(srv_out["blockedEvilOrigin"]["status"], 403)
 
+    def test_icebreaker_mode_switch_and_company_intel_pro_bridge(self) -> None:
+        from hiremate_lib import client as hm_client
+
+        flags = ["--workspace", str(self.ws), "--home", str(self.home)]
+        rc_init, init_out = _run_cli(flags + ["init", "--roles", "AI产品经理", "--cities", "深圳"])
+        self.assertEqual(rc_init, 0)
+        self.assertEqual(init_out["config"]["icebreaker_mode"], "custom")
+
+        rc_set, set_out = _run_cli(flags + ["config", "set", "--icebreaker-mode", "platform_default"])
+        self.assertEqual(rc_set, 0)
+        self.assertEqual(set_out["config"]["icebreaker_mode"], "platform_default")
+
+        prefs = hm_client.config_to_pro_preferences(set_out["config"])
+        self.assertEqual(prefs["icebreaker_mode"], "platform_default")
+        self.assertEqual(prefs["mode_reply"], "semi")
+
+        # 本地缓存公司底细后，_attach_cached_company_intel 自动将高风险标记附带进评估负载
+        rc_probe, _ = _run_cli(
+            flags
+            + [
+                "company",
+                "probe",
+                "--company",
+                "深圳注水壳子科技",
+                "--profile-json",
+                json.dumps({"scale": "1000-9999人", "insured_count": 9, "office_city": "深圳"}, ensure_ascii=False),
+            ]
+        )
+        self.assertEqual(rc_probe, 0)
+        job_payload: dict[str, object] = {"company": "深圳注水壳子科技有限公司", "title": "AI产品经理"}
+        hm_client._attach_cached_company_intel(self.ws, job_payload)
+        self.assertIn("company_intel", job_payload)
+        intel_attached = job_payload["company_intel"]
+        assert isinstance(intel_attached, dict)
+        self.assertEqual(intel_attached["verdict"], "explorable_high_risk")
+        self.assertIn("inflated_scale", intel_attached["risk_flags"])
+
 
 if __name__ == "__main__":
     unittest.main()

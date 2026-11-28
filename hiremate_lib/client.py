@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from . import company_intel
 from . import favorite_batch
 from .ledger import JobLedger
 from .normalize import deduplicate_company_list, employer_shield_match
@@ -421,9 +422,39 @@ def config_to_pro_preferences(config: dict[str, Any]) -> dict[str, Any]:
         "tolerate_lower_panel_salary": bool(config.get("salary_panel_tolerance", True)),
         "salary_match_mode": str(config.get("salary_match_mode") or ("ceiling_tolerant" if config.get("salary_panel_tolerance", True) else "ceiling_strict")),
         "inbound_resume_policy": str(config.get("inbound_resume_policy") or "generous"),
+        "mode_reply": str(config.get("mode_reply") or "semi"),
+        "icebreaker_mode": str(config.get("icebreaker_mode") or "custom"),
         "has_attachment_resume": bool(config.get("has_attachment_resume", True)),
         "resume_source": str(config.get("resume_source") or "pending"),
         "resumes": resumes_payload,
+    }
+
+
+def _attach_cached_company_intel(workspace: Path, job_dict: dict[str, Any]) -> None:
+    """若本地已缓存公司底细判定结论，将脱敏的风险等级与事实摘要附带给评估/守卫引擎。"""
+    if "company_intel" in job_dict:
+        return
+    comp = str(job_dict.get("company") or "").strip()
+    if not comp:
+        return
+    try:
+        intel = company_intel.show_company_intel(workspace, company=comp)
+    except Exception:
+        return
+    if not isinstance(intel, dict) or not intel.get("found"):
+        return
+    facts = intel.get("facts") if isinstance(intel.get("facts"), dict) else {}
+    job_dict["company_intel"] = {
+        "verdict": intel.get("verdict"),
+        "reliability": intel.get("reliability"),
+        "feasibility": intel.get("feasibility"),
+        "risk_flags": list(intel.get("risk_flags") or []),
+        "facts": {
+            "scale": facts.get("scale"),
+            "scale_max_num": facts.get("scale_max_num"),
+            "financing_stage": facts.get("financing_stage"),
+            "insured_count": facts.get("insured_count"),
+        },
     }
 
 
@@ -1125,6 +1156,7 @@ def pro_evaluate_job(
         ch = str(normalized_job.get("channel") or normalized_job.get("source") or "").strip().lower()
         if ch == "inbound":
             normalized_job["is_inbound_recruiter"] = True
+    _attach_cached_company_intel(workspace, normalized_job)
 
     body = {
         "action": "evaluate_job",
@@ -1174,6 +1206,7 @@ def pro_guard_reply(
         ch = str(job_part.get("channel") or job_part.get("source") or "").strip().lower()
         if ch == "inbound":
             job_part["is_inbound_recruiter"] = True
+    _attach_cached_company_intel(workspace, job_part)
 
     comp_guard = str(job_part.get("company") or "").strip()
     if comp_guard:

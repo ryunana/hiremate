@@ -229,6 +229,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=workspace.VALID_DISCOVER_MODES,
         help="筛出好岗后的默认动作：semi=半自动审阅单（默认），favorite=仅自动点击感兴趣收藏不主动投递，auto=全自动定额破冰（需Pro）",
     )
+    p_init.add_argument(
+        "--icebreaker-mode",
+        choices=workspace.VALID_ICEBREAKER_MODES,
+        help="主动打招呼方式：custom=按岗位定制1-2句破冰短句（默认），platform_default=直接点立即沟通使用平台默认招呼语不追加定制话术",
+    )
     p_init.add_argument("--force", action="store_true", help="重置求职偏好配置（默认自动备份并保留前东家黑名单与已填档案）")
     p_init.add_argument(
         "--reset-profile",
@@ -329,6 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="更新简历来源形态：attachment_pdf / online_only / both / none / pending",
     )
     p_cfg_set.add_argument("--inbound-resume-policy", choices=("generous", "strict"))
+    p_cfg_set.add_argument(
+        "--icebreaker-mode",
+        choices=workspace.VALID_ICEBREAKER_MODES,
+        help="主动打招呼方式：custom=按岗位定制1-2句破冰短句（默认），platform_default=直接点立即沟通使用平台默认招呼语不追加定制话术",
+    )
     p_cfg_set.add_argument(
         "--ack-auto-risk",
         action="store_true",
@@ -670,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
                 execution_mode=args.execution_mode,
                 browser_provider=args.browser_provider,
                 resume_source=args.resume_source,
+                icebreaker_mode=args.icebreaker_mode,
                 mode_discover=args.mode_discover,
                 tier=tier,
                 force=args.force,
@@ -802,6 +813,8 @@ def main(argv: list[str] | None = None) -> int:
                     cli_patch["resume_source"] = args.resume_source
                 if args.inbound_resume_policy:
                     cli_patch["inbound_resume_policy"] = args.inbound_resume_policy
+                if args.icebreaker_mode:
+                    cli_patch["icebreaker_mode"] = args.icebreaker_mode
                 if args.ack_auto_risk:
                     cli_patch["auto_risk_acknowledged"] = True
                 workspace.apply_config_updates(cfg, cli_patch)
